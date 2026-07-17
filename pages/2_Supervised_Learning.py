@@ -305,7 +305,6 @@ with col3:
 
 st.markdown("---")
 
-st.title("Tab 2 — Supervised Machine Learning")
 
 
 # ===========================================================================
