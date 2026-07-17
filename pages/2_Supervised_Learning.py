@@ -305,6 +305,7 @@ with col3:
 
 st.markdown("---")
 
+st.title("Tab 2 — Supervised Machine Learning")
 
 
 # ===========================================================================
@@ -486,55 +487,58 @@ if uploaded is not None:
                         ]
                     )
 
-                # Optional UI to set common hyperparameters per selected model
-                ui_params = {}
-                with st.expander("Set hyperparameters for selected model (optional)"):
-                    if model_name in ["Random Forest", "Extra Trees"]:
-                        n_estimators_ui = st.slider("n_estimators", 10, 500, 100)
-                        max_depth_opt = st.selectbox("max_depth", ["None", 3, 5, 10, 20], index=0)
-                        max_depth_ui = None if max_depth_opt == "None" else int(max_depth_opt)
-                        min_samples_split_ui = st.number_input("min_samples_split", 2, 100, 2)
-                        ui_params = {
-                            "n_estimators": n_estimators_ui,
-                            "max_depth": max_depth_ui,
-                            "min_samples_split": int(min_samples_split_ui),
-                        }
-                    elif model_name == "KNN":
-                        n_neighbors_ui = st.slider("n_neighbors", 1, 50, 5)
-                        weights_ui = st.selectbox("weights", ["uniform", "distance"])
-                        metric_ui = st.selectbox("metric", ["minkowski", "euclidean", "manhattan"])
-                        ui_params = {"n_neighbors": n_neighbors_ui, "weights": weights_ui, "metric": metric_ui}
-                    elif model_name == "Decision Tree":
-                        criterion_ui = st.selectbox("criterion", ["gini", "entropy", "log_loss"], index=0)
-                        max_depth_dt_opt = st.selectbox("max_depth", ["None", 3, 5, 10, 20], index=0)
-                        max_depth_dt = None if max_depth_dt_opt == "None" else int(max_depth_dt_opt)
-                        min_samples_leaf_ui = st.number_input("min_samples_leaf", 1, 100, 1)
-                        ui_params = {"criterion": criterion_ui, "max_depth": max_depth_dt, "min_samples_leaf": int(min_samples_leaf_ui)}
-                    elif model_name == "SVR" or model_name == "SVM":
-                        C_ui = st.number_input("C", 0.01, 100.0, 1.0)
-                        kernel_ui = st.selectbox("kernel", ["rbf", "linear", "poly"])
-                        epsilon_ui = st.number_input("epsilon", 0.0, 1.0, 0.1)
-                        ui_params = {"C": C_ui, "kernel": kernel_ui, "epsilon": epsilon_ui}
-                    elif model_name == "Gradient Boosting":
-                        learning_rate_ui = st.number_input("learning_rate", 0.001, 1.0, 0.1)
-                        n_estimators_gb = st.slider("n_estimators", 10, 500, 100)
-                        subsample_ui = st.slider("subsample", 0.1, 1.0, 1.0)
-                        ui_params = {"learning_rate": learning_rate_ui, "n_estimators": n_estimators_gb, "subsample": subsample_ui}
-                    elif model_name == "AdaBoost":
-                        estimator_choice = st.selectbox("estimator", ["Default", "Decision Tree"], index=0)
-                        n_estimators_ab = st.slider("n_estimators", 10, 500, 50)
-                        learning_rate_ab = st.number_input("learning_rate", 0.01, 1.0, 1.0)
-                        ui_params = {"estimator": estimator_choice, "n_estimators": n_estimators_ab, "learning_rate": learning_rate_ab}
-
                 tuning_mode = st.selectbox("Training mode", ["Manual", "Auto-tune hyperparameters"])
                 auto_tune = tuning_mode == "Auto-tune hyperparameters"
 
-                manual_params_str = st.text_input(
-                    "Manual hyperparameters",
-                    value="",
-                    help="Enter comma-separated hyperparameters like C=1.0, max_depth=5. Leave blank to use default/manual widget values."
-                )
-                manual_params = parse_hyperparams(manual_params_str)
+                # Optional UI to set common hyperparameters per selected model
+                ui_params = {}
+                if tuning_mode == "Manual":
+                    with st.expander("Set hyperparameters for selected model (optional)"):
+                        if model_name in ["Random Forest", "Extra Trees"]:
+                            n_estimators_ui = st.slider("n_estimators", 10, 500, 100)
+                            max_depth_opt = st.selectbox("max_depth", ["None", 3, 5, 10, 20], index=0)
+                            max_depth_ui = None if max_depth_opt == "None" else int(max_depth_opt)
+                            min_samples_split_ui = st.number_input("min_samples_split", 2, 100, 2)
+                            ui_params = {
+                                "n_estimators": n_estimators_ui,
+                                "max_depth": max_depth_ui,
+                                "min_samples_split": int(min_samples_split_ui),
+                            }
+                        elif model_name == "KNN":
+                            n_neighbors_ui = st.slider("n_neighbors", 1, 50, 5)
+                            weights_ui = st.selectbox("weights", ["uniform", "distance"])
+                            metric_ui = st.selectbox("metric", ["minkowski", "euclidean", "manhattan"])
+                            ui_params = {"n_neighbors": n_neighbors_ui, "weights": weights_ui, "metric": metric_ui}
+                        elif model_name == "Decision Tree":
+                            criterion_ui = st.selectbox("criterion", ["gini", "entropy", "log_loss"], index=0)
+                            max_depth_dt_opt = st.selectbox("max_depth", ["None", 3, 5, 10, 20], index=0)
+                            max_depth_dt = None if max_depth_dt_opt == "None" else int(max_depth_dt_opt)
+                            min_samples_leaf_ui = st.number_input("min_samples_leaf", 1, 100, 1)
+                            ui_params = {"criterion": criterion_ui, "max_depth": max_depth_dt, "min_samples_leaf": int(min_samples_leaf_ui)}
+                        elif model_name == "SVR" or model_name == "SVM":
+                            C_ui = st.number_input("C", 0.01, 100.0, 1.0)
+                            kernel_ui = st.selectbox("kernel", ["rbf", "linear", "poly"])
+                            epsilon_ui = st.number_input("epsilon", 0.0, 1.0, 0.1)
+                            ui_params = {"C": C_ui, "kernel": kernel_ui, "epsilon": epsilon_ui}
+                        elif model_name == "Gradient Boosting":
+                            learning_rate_ui = st.number_input("learning_rate", 0.001, 1.0, 0.1)
+                            n_estimators_gb = st.slider("n_estimators", 10, 500, 100)
+                            subsample_ui = st.slider("subsample", 0.1, 1.0, 1.0)
+                            ui_params = {"learning_rate": learning_rate_ui, "n_estimators": n_estimators_gb, "subsample": subsample_ui}
+                        elif model_name == "AdaBoost":
+                            estimator_choice = st.selectbox("estimator", ["Default", "Decision Tree"], index=0)
+                            n_estimators_ab = st.slider("n_estimators", 10, 500, 50)
+                            learning_rate_ab = st.number_input("learning_rate", 0.01, 1.0, 1.0)
+                            ui_params = {"estimator": estimator_choice, "n_estimators": n_estimators_ab, "learning_rate": learning_rate_ab}
+
+                    manual_params_str = st.text_input(
+                        "Manual hyperparameters",
+                        value="",
+                        help="Enter comma-separated hyperparameters like C=1.0, max_depth=5. Leave blank to use default/manual widget values."
+                    )
+                    manual_params = parse_hyperparams(manual_params_str)
+                else:
+                    manual_params = {}
 
                 if model_name == "Logistic Regression":
                     if auto_tune:
