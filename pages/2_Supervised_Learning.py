@@ -895,12 +895,16 @@ if uploaded is not None:
                             except Exception:
                                 auc_value = None
 
-                        st.subheader("Evaluation Metrics")
+                        st.subheader("Final Model Performance on the Testing Set")
+                        st.info(
+                            f"These results were calculated using the held-out testing set "
+                            f"({len(X_test)} samples). The testing set was not used to train the model."
+                        )
                         m1, m2, m3, m4 = st.columns(4)
-                        m1.metric("Accuracy", f"{acc:.3f}")
-                        m2.metric("Precision (weighted)", f"{prec:.3f}")
-                        m3.metric("Recall (weighted)", f"{rec:.3f}")
-                        m4.metric("F1 Score (weighted)", f"{f1:.3f}")
+                        m1.metric("Test Accuracy", f"{acc:.3f}")
+                        m2.metric("Test Precision (weighted)", f"{prec:.3f}")
+                        m3.metric("Test Recall (weighted)", f"{rec:.3f}")
+                        m4.metric("Test F1 Score (weighted)", f"{f1:.3f}")
 
                         m5, m6, m7, m8 = st.columns(4)
                         m5.metric("TPR (macro)", f"{rates['TPR']:.3f}")
@@ -951,11 +955,15 @@ if uploaded is not None:
                         mae = mean_absolute_error(y_test, y_pred)
                         r2 = r2_score(y_test, y_pred)
 
-                        st.subheader("Evaluation Metrics")
+                        st.subheader("Final Model Performance on the Testing Set")
+                        st.info(
+                            f"These results were calculated using the held-out testing set "
+                            f"({len(X_test)} samples). The testing set was not used to train the model."
+                        )
                         m1, m2, m3 = st.columns(3)
-                        m1.metric("MSE", f"{mse:.3f}")
-                        m2.metric("MAE", f"{mae:.3f}")
-                        m3.metric("R² Score", f"{r2:.3f}")
+                        m1.metric("Test MSE", f"{mse:.3f}")
+                        m2.metric("Test MAE", f"{mae:.3f}")
+                        m3.metric("Test R² Score", f"{r2:.3f}")
 
                         st.subheader("Predicted vs Actual")
                         fig, ax = plt.subplots()
