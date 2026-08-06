@@ -260,7 +260,7 @@ def prepare_pca_feature_matrix(
 # =========================================================
 # 3.1.1 DATA IMPORT
 # =========================================================
-st.header("3.1.1 Data Import")
+st.header("Data Import")
 
 uploaded_file = st.file_uploader(
     "Import Dataset (CSV, Excel, or MATLAB .mat)",
