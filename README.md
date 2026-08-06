@@ -5,7 +5,7 @@
 - Live Application: [Streamlit Deployment](https://capstone-icaav-project-app-qyoge5zfckgdab5sjs49ep.streamlit.app)
 - Carleton University: [Carleton University](https://carleton.ca)
 - Algonquin College: [Algonquin College](https://www.algonquincollege.com)
-- iCAAV Core: [iCAAV Research](https://carleton.ca/mechatronics/icaav/)
+- iCAAV Core: [iCAAV Research](https://carleton.ca/mechatronics/)
 
 An interactive Streamlit-based machine learning platform developed as a Capstone Project within the Business Intelligence Systems Infrastructure program at Algonquin College in collaboration with the Intelligent Connected Assistive & Autonomous Vehicles (iCAAV) Core at Carleton University.
 
