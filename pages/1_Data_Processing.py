@@ -1,7 +1,4 @@
 import streamlit as st
-from theme import apply_theme
-
-apply_theme()
 import pandas as pd
 import numpy as np
 import io
@@ -10,40 +7,21 @@ import scipy.io
 from PIL import Image
 from mpl_toolkits.mplot3d import Axes3D  # noqa: F401 (registers 3D projection)
 from sklearn.decomposition import PCA
-from sklearn.preprocessing import StandardScaler, MinMaxScaler
+from sklearn.preprocessing import StandardScaler
 from sklearn.feature_selection import mutual_info_classif, mutual_info_regression
 import matplotlib.pyplot as plt
-from branding import render_header
-from theme import apply_theme
 
 # =========================================================
 # PAGE BRANDING
 # =========================================================
-col1, col2, col3 = st.columns([1, 3, 1])
-
-with col1:
-    st.image("assets/icaav_logo.png", width=100)
-
-with col2:
-    st.markdown(
-        """
-        <div class="icaav-page-title">
-            Tab 1 — Data Loading, Feature Engineering, and Visualization
-        </div>
-
-        <div class="icaav-page-subtitle">
-            Intelligent Connected Assistive & Autonomous Vehicles (iCAAV) Core
-            <br>Advanced Biomechatronics and Locomotion Laboratory
-            <br>Carleton University
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-with col3:
-    st.image("assets/carleton_logo.png", width=100)
-
-st.markdown("---")
+st.markdown("""
+    <h2 style='text-align: center; color: #B31B1B; margin-bottom: 0.1rem;'>
+        Tab 1 - Data Loading, Feature Engineering, and Visualization
+    </h2>
+    <p style='text-align: center; color: gray; margin-top: 0;'>
+        iCAAV Core - Advanced Biomechatronics and Locomotion Laboratory - Carleton University
+    </p>
+""", unsafe_allow_html=True)
 
 # =========================================================
 # SESSION STATE INITIALIZATION
@@ -54,6 +32,7 @@ defaults = {
     "feature_cols": [],        # user-designated feature/variable columns
     "engineered_df": None,     # extracted statistical feature set
     "saved_feature_sets": {},  # in-session named feature sets
+    "selected_important_df": None,  # post-visualization feature subset for export
 }
 for k, v in defaults.items():
     if k not in st.session_state:
@@ -171,6 +150,67 @@ def missing_value_counts(df: pd.DataFrame) -> pd.Series:
     return df.isna().sum().sort_values(ascending=False)
 
 
+# Mode imputation is useful for categorical fields and discrete class-like values,
+# so it fills each column with its own most frequent non-missing value.
+def fill_missing_with_mode(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
+    filled_df = df.copy()
+    skipped_cols = []
+    for col in filled_df.columns:
+        mode_values = filled_df[col].dropna().mode()
+        if mode_values.empty:
+            skipped_cols.append(col)
+            continue
+        filled_df[col] = filled_df[col].fillna(mode_values.iloc[0])
+    return filled_df, skipped_cols
+
+
+# Plot-size, axis-scale, and zoom controls are shared by the main visualizations
+# so the client can adjust views without adding repetitive controls to each plot.
+def apply_plot_controls(
+    ax,
+    zoom_percent: int = 100,
+    axis_scale: str = "Linear",
+    apply_x: bool = True,
+    apply_y: bool = True,
+):
+    if axis_scale == "Symmetric log":
+        if apply_x:
+            ax.set_xscale("symlog")
+        if apply_y:
+            ax.set_yscale("symlog")
+
+    if zoom_percent == 100:
+        return
+
+    zoom_factor = zoom_percent / 100
+    if apply_x:
+        x_min, x_max = ax.get_xlim()
+        x_center = (x_min + x_max) / 2
+        x_half_range = (x_max - x_min) * zoom_factor / 2
+        ax.set_xlim(x_center - x_half_range, x_center + x_half_range)
+    if apply_y:
+        y_min, y_max = ax.get_ylim()
+        y_center = (y_min + y_max) / 2
+        y_half_range = (y_max - y_min) * zoom_factor / 2
+        ax.set_ylim(y_center - y_half_range, y_center + y_half_range)
+
+
+# User-selected important features are stored separately so downloads do not
+# mutate the working dataset or engineered feature set.
+def build_important_feature_subset(
+    source_df: pd.DataFrame,
+    feature_cols: list[str],
+    label_col: str | None = None,
+    include_label: bool = True,
+) -> pd.DataFrame:
+    selected_cols = []
+    if include_label and label_col in source_df.columns:
+        selected_cols.append(label_col)
+    selected_cols.extend([c for c in feature_cols if c in source_df.columns])
+    selected_cols = list(dict.fromkeys(selected_cols))
+    return source_df[selected_cols].copy() if selected_cols else pd.DataFrame(index=source_df.index)
+
+
 # PCA needs a clean feature matrix and an audit trail of what was removed so the
 # user can interpret the result instead of silently fitting on unsuitable fields.
 def prepare_pca_feature_matrix(
@@ -265,7 +305,7 @@ if uploaded_file is not None:
 df = st.session_state.df
 
 if df is not None:
-    st.success(f"Dataset Loaded — Shape: {df.shape}")
+    st.success(f"Dataset Loaded - Shape: {df.shape}")
     st.dataframe(df.head())
 
     all_cols = df.columns.tolist()
@@ -275,12 +315,11 @@ if df is not None:
     # The overview gives quick quality checks before the user makes modeling
     # choices, which helps catch data issues while staying before supervised ML.
     st.subheader("Dataset Overview")
-    overview_cols = st.columns(5)
+    overview_cols = st.columns(4)
     overview_cols[0].metric("Rows", f"{df.shape[0]:,}")
     overview_cols[1].metric("Columns", f"{df.shape[1]:,}")
     overview_cols[2].metric("Numeric", f"{len(numeric_cols_all):,}")
     overview_cols[3].metric("Categorical", f"{len(categorical_cols_all):,}")
-    overview_cols[4].metric("Duplicate Rows", f"{df.duplicated().sum():,}")
 
     dtype_summary = pd.DataFrame({
         "Column": all_cols,
@@ -399,7 +438,7 @@ if df is not None:
         fill_strategy = st.selectbox(
             "Missing Value Handling Strategy",
             ["Do nothing", "Drop rows with missing values", "Fill with mean",
-             "Fill with median", "Fill with zero", "Forward fill"]
+             "Fill with median", "Fill with mode", "Fill with zero", "Forward fill"]
         )
         if st.button("Apply Missing Value Handling"):
             if fill_strategy == "Drop rows with missing values":
@@ -414,6 +453,10 @@ if df is not None:
                     df[numeric_cols] = df[numeric_cols].fillna(df[numeric_cols].median())
                 else:
                     st.warning("No numeric columns are available for median imputation.")
+            elif fill_strategy == "Fill with mode":
+                df, skipped_mode_cols = fill_missing_with_mode(df)
+                if skipped_mode_cols:
+                    st.warning("Mode imputation skipped all-missing column(s): " + ", ".join(skipped_mode_cols))
             elif fill_strategy == "Fill with zero":
                 df = df.fillna(0)
             elif fill_strategy == "Forward fill":
@@ -425,32 +468,8 @@ if df is not None:
                 st.success("Missing value handling applied.")
                 st.dataframe(df.head())
 
-    st.subheader("Normalization / Standardization")
-    if numeric_signal_cols:
-        constant_scale_cols = constant_columns(df, numeric_signal_cols)
-        scalable_cols = [c for c in numeric_signal_cols if c not in constant_scale_cols]
-        if constant_scale_cols:
-            st.warning(
-                "Constant column(s) are excluded from scaling: "
-                + ", ".join(constant_scale_cols)
-            )
-        scale_cols = st.multiselect(
-            "Columns to Scale", scalable_cols, default=scalable_cols, key="scale_cols"
-        )
-        scale_method = st.radio(
-            "Method", ["Standardization (z-score)", "Normalization (Min-Max)"], horizontal=True
-        )
-        if st.button("Apply Scaling") and scale_cols:
-            if df[scale_cols].isna().any().any():
-                st.warning("Selected columns contain missing values. Handle missing values before scaling.")
-            else:
-                scaler = StandardScaler() if scale_method.startswith("Standardization") else MinMaxScaler()
-                df[scale_cols] = scaler.fit_transform(df[scale_cols])
-                st.session_state.df = df
-                st.success(f"Applied {scale_method} to selected feature columns.")
-                st.dataframe(df.head())
-    else:
-        st.info("No numeric feature columns are available for scaling after excluding labels and metadata.")
+    # Client requested removing user-controlled normalization/standardization from Tab 1.
+    st.caption("Normalization and standardization controls were removed from preprocessing; data is not scaled in this section.")
 
 st.markdown("---")
 
@@ -497,7 +516,7 @@ if df is not None and channels:
 
             feat_df = pd.DataFrame(features)
             st.session_state.engineered_df = feat_df
-            st.success(f"Feature Set Extracted — Shape: {feat_df.shape}")
+            st.success(f"Feature Set Extracted - Shape: {feat_df.shape}")
 
 if st.session_state.engineered_df is not None:
     st.dataframe(st.session_state.engineered_df.head())
@@ -588,6 +607,21 @@ if df is not None:
     ]
     viz_plot_defaults = viz_signal_numeric if viz_signal_numeric else viz_numeric
 
+    # Compact shared controls let users adjust chart scale, size, bins, and zoom
+    # once instead of repeating those settings in every visualization block.
+    with st.expander("Visualization controls", expanded=True):
+        ctrl_cols = st.columns(4, vertical_alignment="bottom")
+        with ctrl_cols[0]:
+            plot_width = st.slider("Plot width", 5, 12, 7, key="viz_plot_width")
+        with ctrl_cols[1]:
+            plot_height = st.slider("Plot height", 3, 8, 4, key="viz_plot_height")
+        with ctrl_cols[2]:
+            zoom_pct = st.slider("Zoom level (%)", 50, 200, 100, 10, key="viz_zoom_pct")
+        with ctrl_cols[3]:
+            axis_scale = st.selectbox("Axis scale", ["Linear", "Symmetric log"], key="viz_axis_scale")
+        hist_bins = st.slider("Histogram bins", 5, 200, 30, key="viz_hist_bins")
+        st.caption("Use zoom below 100% to zoom in and above 100% to zoom out. Symmetric log helps inspect features with very small and large values.")
+
     if not viz_numeric:
         st.warning("No numeric columns are available for visualization.")
     else:
@@ -611,7 +645,7 @@ if df is not None:
         if can_color_by_label:
             st.subheader("Target / Class Distribution")
             target_counts = viz_df[color_col].value_counts(dropna=False).sort_index()
-            fig_target, ax_target = plt.subplots(figsize=(6, 4))
+            fig_target, ax_target = plt.subplots(figsize=(plot_width, plot_height))
             target_counts.plot(kind="bar", ax=ax_target)
             ax_target.set_xlabel(color_col)
             ax_target.set_ylabel("Count")
@@ -634,14 +668,15 @@ if df is not None:
             if dist_cols:
                 n_cols = min(2, len(dist_cols))
                 n_rows = int(np.ceil(len(dist_cols) / n_cols))
-                fig_dist, axes = plt.subplots(n_rows, n_cols, figsize=(6 * n_cols, 3.5 * n_rows))
+                fig_dist, axes = plt.subplots(n_rows, n_cols, figsize=(plot_width * n_cols, plot_height * n_rows))
                 axes = np.atleast_1d(axes).ravel()
                 for ax, col in zip(axes, dist_cols):
                     series = pd.to_numeric(viz_df[col], errors="coerce").dropna()
-                    ax.hist(series, bins=30, alpha=0.8)
+                    ax.hist(series, bins=hist_bins, alpha=0.8)
                     ax.set_xlabel(col)
                     ax.set_ylabel("Frequency")
                     ax.set_title(f"Distribution of {col}")
+                    apply_plot_controls(ax, zoom_pct, "Linear", apply_x=True, apply_y=False)
                 for ax in axes[len(dist_cols):]:
                     ax.axis("off")
                 fig_dist.tight_layout()
@@ -706,10 +741,11 @@ if df is not None:
                 ]
                 valid_box = [(c, s) for c, s in zip(box_cols, box_data) if not s.empty]
                 if valid_box:
-                    fig_box, ax_box = plt.subplots(figsize=(max(7, 1.2 * len(valid_box)), 4.5))
+                    fig_box, ax_box = plt.subplots(figsize=(max(plot_width, 1.2 * len(valid_box)), plot_height))
                     ax_box.boxplot([s for _, s in valid_box], tick_labels=[c for c, _ in valid_box], showfliers=True)
                     ax_box.set_ylabel("Value")
                     ax_box.set_title("Outlier Overview by Feature")
+                    apply_plot_controls(ax_box, zoom_pct, axis_scale, apply_x=False, apply_y=True)
                     ax_box.tick_params(axis="x", rotation=45)
                     fig_box.tight_layout()
                     st.pyplot(fig_box)
@@ -724,12 +760,13 @@ if df is not None:
     st.subheader("Time-Series Plot")
     ts_cols = st.multiselect("Select Signal(s) to Plot", viz_numeric, default=viz_plot_defaults[:1])
     if ts_cols:
-        fig_ts, ax_ts = plt.subplots(figsize=(8, 4))
+        fig_ts, ax_ts = plt.subplots(figsize=(plot_width, plot_height))
         for c in ts_cols:
             ax_ts.plot(viz_df.index, viz_df[c], label=c, linewidth=1)
         ax_ts.set_xlabel("Index")
         ax_ts.set_ylabel("Value")
         ax_ts.set_title("Time-Series Plot")
+        apply_plot_controls(ax_ts, zoom_pct, axis_scale)
         ax_ts.legend()
         st.pyplot(fig_ts)
         download_fig_button(fig_ts, "dl_ts", "time_series_plot.png")
@@ -738,18 +775,18 @@ if df is not None:
     st.subheader("Histogram")
     if viz_numeric:
         hist_col = st.selectbox("Select Column for Histogram", viz_numeric, key="hist_col")
-        bins = st.slider("Number of Bins", 5, 200, 30)
         if hist_col:
-            fig_hist, ax_hist = plt.subplots(figsize=(6, 4))
+            fig_hist, ax_hist = plt.subplots(figsize=(plot_width, plot_height))
             if can_color_by_label:
                 for label_val, group in viz_df.groupby(color_col):
-                    ax_hist.hist(group[hist_col].dropna(), bins=bins, alpha=0.6, label=str(label_val))
+                    ax_hist.hist(group[hist_col].dropna(), bins=hist_bins, alpha=0.6, label=str(label_val))
                 ax_hist.legend(title=color_col)
             else:
-                ax_hist.hist(viz_df[hist_col].dropna(), bins=bins, alpha=0.8)
+                ax_hist.hist(viz_df[hist_col].dropna(), bins=hist_bins, alpha=0.8)
             ax_hist.set_xlabel(hist_col)
             ax_hist.set_ylabel("Frequency")
             ax_hist.set_title(f"Histogram of {hist_col}")
+            apply_plot_controls(ax_hist, zoom_pct, "Linear", apply_x=True, apply_y=False)
             st.pyplot(fig_hist)
             download_fig_button(fig_hist, "dl_hist", "histogram.png")
 
@@ -760,7 +797,7 @@ if df is not None:
     if scatter_dim == "2D" and len(viz_numeric) >= 2:
         sx = st.selectbox("X-axis", viz_numeric, index=0, key="sx2d")
         sy = st.selectbox("Y-axis", viz_numeric, index=1, key="sy2d")
-        fig_sc, ax_sc = plt.subplots(figsize=(6, 5))
+        fig_sc, ax_sc = plt.subplots(figsize=(plot_width, plot_height))
         if can_color_by_label:
             for label_val, group in viz_df.groupby(color_col):
                 ax_sc.scatter(group[sx], group[sy], label=str(label_val), alpha=0.7)
@@ -770,6 +807,7 @@ if df is not None:
         ax_sc.set_xlabel(sx)
         ax_sc.set_ylabel(sy)
         ax_sc.set_title("2D Scatter Plot")
+        apply_plot_controls(ax_sc, zoom_pct, axis_scale)
         st.pyplot(fig_sc)
         download_fig_button(fig_sc, "dl_sc2d", "scatter_2d.png")
 
@@ -777,7 +815,7 @@ if df is not None:
         sx3 = st.selectbox("X-axis", viz_numeric, index=0, key="sx3d")
         sy3 = st.selectbox("Y-axis", viz_numeric, index=1, key="sy3d")
         sz3 = st.selectbox("Z-axis", viz_numeric, index=2, key="sz3d")
-        fig3d = plt.figure(figsize=(7, 6))
+        fig3d = plt.figure(figsize=(plot_width, plot_height + 1))
         ax3d = fig3d.add_subplot(111, projection="3d")
         if can_color_by_label:
             for label_val, group in viz_df.groupby(color_col):
@@ -800,14 +838,14 @@ if df is not None:
         "Select Features to Compare", viz_numeric, default=viz_plot_defaults[:min(4, len(viz_plot_defaults))]
     )
     if len(multi_cols) >= 2:
-        fig_mat, axes = plt.subplots(len(multi_cols), len(multi_cols), figsize=(3 * len(multi_cols), 3 * len(multi_cols)))
+        fig_mat, axes = plt.subplots(len(multi_cols), len(multi_cols), figsize=(max(3 * len(multi_cols), plot_width), max(3 * len(multi_cols), plot_height)))
         groups = list(viz_df.groupby(color_col)) if can_color_by_label else [(None, viz_df)]
         for i, ci in enumerate(multi_cols):
             for j, cj in enumerate(multi_cols):
                 ax = axes[i][j] if len(multi_cols) > 1 else axes
                 if i == j:
                     for label_val, group in groups:
-                        ax.hist(group[ci].dropna(), bins=20, alpha=0.6)
+                        ax.hist(group[ci].dropna(), bins=hist_bins, alpha=0.6)
                 else:
                     for label_val, group in groups:
                         ax.scatter(group[cj], group[ci], s=8, alpha=0.6)
@@ -820,6 +858,56 @@ if df is not None:
         fig_mat.tight_layout()
         st.pyplot(fig_mat)
         download_fig_button(fig_mat, "dl_multi", "multi_feature_comparison.png")
+
+    # After visualization, users can retain only the columns they judge important
+    # and download that smaller feature set without changing the active dataset.
+    st.subheader("Retain Important Features After Visualization")
+    if viz_signal_numeric:
+        feature_scores = viz_df[viz_signal_numeric].replace([np.inf, -np.inf], np.nan).std(numeric_only=True).dropna()
+        default_important = feature_scores.sort_values(ascending=False).head(min(8, len(feature_scores))).index.tolist()
+        if not default_important:
+            default_important = viz_signal_numeric[:min(8, len(viz_signal_numeric))]
+        important_cols = st.multiselect(
+            "Select important features to retain",
+            viz_signal_numeric,
+            default=default_important,
+            key="important_feature_cols",
+            help="Use the visualizations above to keep only the features that appear useful for download."
+        )
+        include_label_export = st.checkbox(
+            "Include selected label/class column in retained download",
+            value=bool(can_color_by_label),
+            key="include_label_in_important_export",
+        )
+        if st.button("Prepare Retained Feature Set"):
+            retained_df = build_important_feature_subset(viz_df, important_cols, color_col, include_label_export)
+            st.session_state.selected_important_df = retained_df
+            st.success(f"Retained feature set prepared - Shape: {retained_df.shape}")
+        if st.session_state.selected_important_df is not None:
+            retained_df = st.session_state.selected_important_df
+            st.dataframe(retained_df.head())
+            r1, r2, r3 = st.columns(3)
+            with r1:
+                st.download_button(
+                    "Download Retained CSV",
+                    to_csv_bytes(retained_df),
+                    file_name="retained_important_features.csv",
+                    mime="text/csv",
+                )
+            with r2:
+                st.download_button(
+                    "Download Retained NumPy",
+                    to_npy_bytes(retained_df),
+                    file_name="retained_important_features.npy",
+                )
+            with r3:
+                st.download_button(
+                    "Download Retained Pickle",
+                    to_pickle_bytes(retained_df),
+                    file_name="retained_important_features.pkl",
+                )
+    else:
+        st.info("No numeric signal features are available to retain from this visualization source.")
 else:
     st.info("Upload a dataset to enable visualizations.")
 
@@ -901,10 +989,10 @@ if df is not None:
                 ax_pca.scatter(X_pca[:, 0], X_pca[:, 1], alpha=0.7)
             ax_pca.set_xlabel("PC1")
             ax_pca.set_ylabel("PC2")
-            ax_pca.set_title("PCA Scatter Plot (Standardized Features)")
+            ax_pca.set_title("PCA Scatter Plot")
             st.pyplot(fig_pca)
             st.caption(
-                "PC1 is the direction of greatest variance in the standardized features; "
+                "PC1 is the direction of greatest variance in the PCA-ready numeric features; "
                 "PC2 is the next independent direction of variance."
             )
             download_fig_button(fig_pca, "dl_pca", "pca_scatter.png")
@@ -938,7 +1026,7 @@ if df is not None:
                 recommended_components = int(reached_threshold[0] + 1)
                 st.success(
                     f"Recommendation: use at least {recommended_components} component(s) "
-                    "to capture about 90% of the standardized feature variance."
+                    "to capture about 90% of the feature variance."
                 )
             else:
                 st.info(
@@ -1024,12 +1112,21 @@ st.markdown("---")
 # =========================================================
 st.header("3.1.8 Export Capability")
 
+export_options = ["Raw / Preprocessed Data", "Engineered Feature Set"]
+if st.session_state.selected_important_df is not None:
+    export_options.append("Retained Important Features")
+
 export_target = st.radio(
     "Dataset to Export",
-    ["Raw / Preprocessed Data", "Engineered Feature Set"],
+    export_options,
     horizontal=True,
 )
-export_df = df if export_target == "Raw / Preprocessed Data" else st.session_state.engineered_df
+if export_target == "Raw / Preprocessed Data":
+    export_df = df
+elif export_target == "Engineered Feature Set":
+    export_df = st.session_state.engineered_df
+else:
+    export_df = st.session_state.selected_important_df
 
 if export_df is not None:
     e1, e2, e3 = st.columns(3)
@@ -1054,3 +1151,15 @@ if export_df is not None:
         )
 else:
     st.info("Nothing available to export yet for this selection.")
+
+st.markdown("---")
+# Logos were moved to the bottom per the client comment, keeping the top area
+# compact while still preserving project branding.
+footer_left, footer_mid, footer_right = st.columns([1, 2, 1], vertical_alignment="center")
+with footer_left:
+    st.image("assets/icaav_logo.png", width=110)
+with footer_mid:
+    st.caption("iCAAV Core - Advanced Biomechatronics and Locomotion Laboratory - Carleton University")
+with footer_right:
+    st.image("assets/carleton_logo.png", width=110)
+
