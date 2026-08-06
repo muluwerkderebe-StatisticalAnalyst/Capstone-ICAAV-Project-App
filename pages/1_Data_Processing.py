@@ -469,7 +469,7 @@ if df is not None:
                 st.dataframe(df.head())
 
     # Client requested removing user-controlled normalization/standardization from Tab 1.
-    st.caption( )
+    st.caption("Normalization and standardization controls were removed from preprocessing; data is not scaled in this section.")
 
 st.markdown("---")
 
