@@ -16,7 +16,7 @@ import matplotlib.pyplot as plt
 # =========================================================
 st.markdown("""
     <h2 style='text-align: center; color: #B31B1B; margin-bottom: 0.1rem;'>
-        Data Loading, Feature Engineering, and Visualization
+        Tab 1 - Data Loading, Feature Engineering, and Visualization
     </h2>
     <p style='text-align: center; color: gray; margin-top: 0;'>
         iCAAV Core - Advanced Biomechatronics and Locomotion Laboratory - Carleton University
@@ -164,35 +164,114 @@ def fill_missing_with_mode(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
     return filled_df, skipped_cols
 
 
-# Plot-size, axis-scale, and zoom controls are shared by the main visualizations
-# so the client can adjust views without adding repetitive controls to each plot.
+# Shared visualization controls are converted into one config dictionary so
+# every Matplotlib plot reads the same size, scale, bins, and zoom settings.
+def build_plot_config(
+    width: int,
+    height: int,
+    zoom_percent: int,
+    axis_scale: str,
+    hist_bins: int,
+) -> dict:
+    return {
+        "width": width,
+        "height": height,
+        "figsize": (width, height),
+        "zoom_percent": zoom_percent,
+        "axis_scale": axis_scale,
+        "hist_bins": hist_bins,
+    }
+
+
+def finite_numeric_values(values) -> np.ndarray:
+    if values is None:
+        return np.array([], dtype=float)
+    numeric = pd.to_numeric(pd.Series(np.asarray(values).ravel()), errors="coerce")
+    numeric = numeric.replace([np.inf, -np.inf], np.nan).dropna()
+    return numeric.to_numpy(dtype=float)
+
+
+def padded_axis_limits(values, zoom_percent: int, log_scale: bool = False):
+    vals = finite_numeric_values(values)
+    if log_scale:
+        vals = vals[vals > 0]
+    if vals.size == 0:
+        return None
+
+    v_min = float(np.min(vals))
+    v_max = float(np.max(vals))
+    zoom_factor = zoom_percent / 100
+
+    if np.isclose(v_min, v_max):
+        pad = max(abs(v_min) * 0.05, 1.0)
+        if log_scale:
+            v_min = max(v_min / 1.5, np.nextafter(0, 1))
+            v_max = v_max * 1.5
+        else:
+            v_min -= pad
+            v_max += pad
+
+    if log_scale:
+        log_min = np.log10(v_min)
+        log_max = np.log10(v_max)
+        center = (log_min + log_max) / 2
+        half_range = max((log_max - log_min) * 1.05 / 2, 0.05) * zoom_factor
+        return 10 ** (center - half_range), 10 ** (center + half_range)
+
+    center = (v_min + v_max) / 2
+    half_range = max((v_max - v_min) * 1.05 / 2, 0.5) * zoom_factor
+    return center - half_range, center + half_range
+
+
+def set_axis_scale_safely(ax, axis: str, axis_scale: str, values) -> str:
+    vals = finite_numeric_values(values)
+    if axis_scale == "Log":
+        if vals.size > 0 and np.all(vals > 0):
+            getattr(ax, f"set_{axis}scale")("log")
+            return "Log"
+        getattr(ax, f"set_{axis}scale")("linear")
+        return "Linear"
+    if axis_scale == "Symmetric log":
+        getattr(ax, f"set_{axis}scale")("symlog")
+        return "Symmetric log"
+    getattr(ax, f"set_{axis}scale")("linear")
+    return "Linear"
+
+
+# Below 100% zooms in and above 100% zooms out by resizing limits around the
+# plotted data range, not the browser zoom or Streamlit page scale.
 def apply_plot_controls(
     ax,
-    zoom_percent: int = 100,
-    axis_scale: str = "Linear",
+    config: dict,
+    x_values=None,
+    y_values=None,
     apply_x: bool = True,
     apply_y: bool = True,
 ):
-    if axis_scale == "Symmetric log":
-        if apply_x:
-            ax.set_xscale("symlog")
-        if apply_y:
-            ax.set_yscale("symlog")
-
-    if zoom_percent == 100:
-        return
-
-    zoom_factor = zoom_percent / 100
     if apply_x:
-        x_min, x_max = ax.get_xlim()
-        x_center = (x_min + x_max) / 2
-        x_half_range = (x_max - x_min) * zoom_factor / 2
-        ax.set_xlim(x_center - x_half_range, x_center + x_half_range)
+        x_scale = set_axis_scale_safely(ax, "x", config["axis_scale"], x_values)
+        x_limits = padded_axis_limits(x_values, config["zoom_percent"], log_scale=x_scale == "Log")
+        if x_limits is not None:
+            ax.set_xlim(*x_limits)
     if apply_y:
-        y_min, y_max = ax.get_ylim()
-        y_center = (y_min + y_max) / 2
-        y_half_range = (y_max - y_min) * zoom_factor / 2
-        ax.set_ylim(y_center - y_half_range, y_center + y_half_range)
+        y_scale = set_axis_scale_safely(ax, "y", config["axis_scale"], y_values)
+        y_limits = padded_axis_limits(y_values, config["zoom_percent"], log_scale=y_scale == "Log")
+        if y_limits is not None:
+            ax.set_ylim(*y_limits)
+
+
+# Matplotlib 3D axes do not support the same safe axis-scale behavior as 2D axes,
+# so 3D uses the shared size and zoom only.
+def apply_3d_zoom_controls(ax, config: dict, x_values, y_values, z_values):
+    x_limits = padded_axis_limits(x_values, config["zoom_percent"])
+    y_limits = padded_axis_limits(y_values, config["zoom_percent"])
+    z_limits = padded_axis_limits(z_values, config["zoom_percent"])
+    if x_limits is not None:
+        ax.set_xlim(*x_limits)
+    if y_limits is not None:
+        ax.set_ylim(*y_limits)
+    if z_limits is not None:
+        ax.set_zlim(*z_limits)
 
 
 # User-selected important features are stored separately so downloads do not
@@ -260,7 +339,7 @@ def prepare_pca_feature_matrix(
 # =========================================================
 # 3.1.1 DATA IMPORT
 # =========================================================
-st.header("Data Import")
+st.header("3.1.1 Data Import")
 
 uploaded_file = st.file_uploader(
     "Import Dataset (CSV, Excel, or MATLAB .mat)",
@@ -406,7 +485,7 @@ st.markdown("---")
 # =========================================================
 # 3.1.7 DATA PREPROCESSING
 # =========================================================
-st.header("Data Preprocessing")
+st.header("3.1.7 Data Preprocessing")
 
 if df is not None:
     numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
@@ -476,7 +555,7 @@ st.markdown("---")
 # =========================================================
 # 3.1.2 / 3.1.3 FEATURE EXTRACTION & WINDOWING
 # =========================================================
-st.header("Feature Extraction (Statistical Features & Windowing)")
+st.header("3.1.2 – 3.1.3 Feature Extraction (Statistical Features & Windowing)")
 
 if df is not None and channels:
     window_size = st.number_input("Window Size", min_value=1, value=50)
@@ -528,7 +607,7 @@ st.markdown("---")
 # =========================================================
 # 3.1.4 FEATURE SELECTION AND MANAGEMENT
 # =========================================================
-st.header("Feature Selection and Management")
+st.header("3.1.4 Feature Selection and Management")
 
 if st.session_state.engineered_df is not None:
     feat_df = st.session_state.engineered_df
@@ -579,7 +658,7 @@ st.markdown("---")
 # =========================================================
 # 3.1.5 VISUALIZATION
 # =========================================================
-st.header("Visualization")
+st.header("3.1.5 Visualization")
 
 if df is not None:
     data_source = st.radio(
@@ -607,8 +686,7 @@ if df is not None:
     ]
     viz_plot_defaults = viz_signal_numeric if viz_signal_numeric else viz_numeric
 
-    # Compact shared controls let users adjust chart scale, size, bins, and zoom
-    # once instead of repeating those settings in every visualization block.
+    # One shared config keeps all visualization controls synchronized across plots.
     with st.expander("Visualization controls", expanded=True):
         ctrl_cols = st.columns(4, vertical_alignment="bottom")
         with ctrl_cols[0]:
@@ -618,9 +696,10 @@ if df is not None:
         with ctrl_cols[2]:
             zoom_pct = st.slider("Zoom level (%)", 50, 200, 100, 10, key="viz_zoom_pct")
         with ctrl_cols[3]:
-            axis_scale = st.selectbox("Axis scale", ["Linear", "Symmetric log"], key="viz_axis_scale")
+            axis_scale = st.selectbox("Axis scale", ["Linear", "Log", "Symmetric log"], key="viz_axis_scale")
         hist_bins = st.slider("Histogram bins", 5, 200, 30, key="viz_hist_bins")
-        st.caption("Use zoom below 100% to zoom in and above 100% to zoom out. Symmetric log helps inspect features with very small and large values.")
+        st.caption("Below 100% zooms in; above 100% zooms out. Log scale is applied only when the selected axis data is strictly positive.")
+    viz_config = build_plot_config(plot_width, plot_height, zoom_pct, axis_scale, hist_bins)
 
     if not viz_numeric:
         st.warning("No numeric columns are available for visualization.")
@@ -633,11 +712,12 @@ if df is not None:
         if viz_missing.empty:
             st.success("No missing values detected in the selected visualization data.")
         else:
-            fig_missing, ax_missing = plt.subplots(figsize=(7, max(3, 0.25 * len(viz_missing))))
+            fig_missing, ax_missing = plt.subplots(figsize=viz_config["figsize"])
             viz_missing.sort_values().plot(kind="barh", ax=ax_missing)
             ax_missing.set_xlabel("Missing Values")
             ax_missing.set_ylabel("Column")
             ax_missing.set_title("Missing Values by Column")
+            apply_plot_controls(ax_missing, viz_config, x_values=viz_missing.values, apply_x=True, apply_y=False)
             st.pyplot(fig_missing)
             st.caption("Columns with more missing values may need imputation or exclusion before PCA.")
             download_fig_button(fig_missing, "dl_missing_values", "missing_values.png")
@@ -645,12 +725,13 @@ if df is not None:
         if can_color_by_label:
             st.subheader("Target / Class Distribution")
             target_counts = viz_df[color_col].value_counts(dropna=False).sort_index()
-            fig_target, ax_target = plt.subplots(figsize=(plot_width, plot_height))
+            fig_target, ax_target = plt.subplots(figsize=viz_config["figsize"])
             target_counts.plot(kind="bar", ax=ax_target)
             ax_target.set_xlabel(color_col)
             ax_target.set_ylabel("Count")
             ax_target.set_title(f"Distribution of {color_col}")
             ax_target.tick_params(axis="x", rotation=0)
+            apply_plot_controls(ax_target, viz_config, y_values=target_counts.values, apply_x=False, apply_y=True)
             st.pyplot(fig_target)
             st.caption("Class balance affects interpretation of PCA coloring and later supervised learning.")
             download_fig_button(fig_target, "dl_target_dist", "target_distribution.png")
@@ -668,15 +749,15 @@ if df is not None:
             if dist_cols:
                 n_cols = min(2, len(dist_cols))
                 n_rows = int(np.ceil(len(dist_cols) / n_cols))
-                fig_dist, axes = plt.subplots(n_rows, n_cols, figsize=(plot_width * n_cols, plot_height * n_rows))
+                fig_dist, axes = plt.subplots(n_rows, n_cols, figsize=(viz_config["width"] * n_cols, viz_config["height"] * n_rows))
                 axes = np.atleast_1d(axes).ravel()
                 for ax, col in zip(axes, dist_cols):
                     series = pd.to_numeric(viz_df[col], errors="coerce").dropna()
-                    ax.hist(series, bins=hist_bins, alpha=0.8)
+                    ax.hist(series, bins=viz_config["hist_bins"], alpha=0.8)
                     ax.set_xlabel(col)
                     ax.set_ylabel("Frequency")
                     ax.set_title(f"Distribution of {col}")
-                    apply_plot_controls(ax, zoom_pct, "Linear", apply_x=True, apply_y=False)
+                    apply_plot_controls(ax, viz_config, x_values=series, apply_x=True, apply_y=False)
                 for ax in axes[len(dist_cols):]:
                     ax.axis("off")
                 fig_dist.tight_layout()
@@ -697,7 +778,7 @@ if df is not None:
             )
             if len(corr_cols) >= 2:
                 corr = viz_df[corr_cols].corr()
-                fig_corr, ax_corr = plt.subplots(figsize=(max(6, 0.7 * len(corr_cols)), max(5, 0.6 * len(corr_cols))))
+                fig_corr, ax_corr = plt.subplots(figsize=viz_config["figsize"])
                 im = ax_corr.imshow(corr, vmin=-1, vmax=1, cmap="coolwarm")
                 ax_corr.set_xticks(range(len(corr_cols)))
                 ax_corr.set_yticks(range(len(corr_cols)))
@@ -718,11 +799,12 @@ if df is not None:
                 st.info("No valid numeric variability values are available.")
             else:
                 top_variability = variability.sort_values(ascending=False).head(20)
-                fig_var_feat, ax_var_feat = plt.subplots(figsize=(7, max(3, 0.25 * len(top_variability))))
+                fig_var_feat, ax_var_feat = plt.subplots(figsize=viz_config["figsize"])
                 top_variability.sort_values().plot(kind="barh", ax=ax_var_feat)
                 ax_var_feat.set_xlabel("Standard Deviation")
                 ax_var_feat.set_ylabel("Feature")
                 ax_var_feat.set_title("Feature Standard Deviation")
+                apply_plot_controls(ax_var_feat, viz_config, x_values=top_variability.values, apply_x=True, apply_y=False)
                 st.pyplot(fig_var_feat)
                 st.caption("Low-variability features may contribute little to PCA or later modeling.")
                 download_fig_button(fig_var_feat, "dl_feature_std", "feature_standard_deviation.png")
@@ -741,11 +823,11 @@ if df is not None:
                 ]
                 valid_box = [(c, s) for c, s in zip(box_cols, box_data) if not s.empty]
                 if valid_box:
-                    fig_box, ax_box = plt.subplots(figsize=(max(plot_width, 1.2 * len(valid_box)), plot_height))
+                    fig_box, ax_box = plt.subplots(figsize=(max(viz_config["width"], 1.2 * len(valid_box)), viz_config["height"]))
                     ax_box.boxplot([s for _, s in valid_box], tick_labels=[c for c, _ in valid_box], showfliers=True)
                     ax_box.set_ylabel("Value")
                     ax_box.set_title("Outlier Overview by Feature")
-                    apply_plot_controls(ax_box, zoom_pct, axis_scale, apply_x=False, apply_y=True)
+                    apply_plot_controls(ax_box, viz_config, y_values=np.concatenate([s.to_numpy() for _, s in valid_box]), apply_x=False, apply_y=True)
                     ax_box.tick_params(axis="x", rotation=45)
                     fig_box.tight_layout()
                     st.pyplot(fig_box)
@@ -760,13 +842,13 @@ if df is not None:
     st.subheader("Time-Series Plot")
     ts_cols = st.multiselect("Select Signal(s) to Plot", viz_numeric, default=viz_plot_defaults[:1])
     if ts_cols:
-        fig_ts, ax_ts = plt.subplots(figsize=(plot_width, plot_height))
+        fig_ts, ax_ts = plt.subplots(figsize=viz_config["figsize"])
         for c in ts_cols:
             ax_ts.plot(viz_df.index, viz_df[c], label=c, linewidth=1)
         ax_ts.set_xlabel("Index")
         ax_ts.set_ylabel("Value")
         ax_ts.set_title("Time-Series Plot")
-        apply_plot_controls(ax_ts, zoom_pct, axis_scale)
+        apply_plot_controls(ax_ts, viz_config, x_values=viz_df.index, y_values=viz_df[ts_cols].to_numpy(), apply_x=True, apply_y=True)
         ax_ts.legend()
         st.pyplot(fig_ts)
         download_fig_button(fig_ts, "dl_ts", "time_series_plot.png")
@@ -776,17 +858,17 @@ if df is not None:
     if viz_numeric:
         hist_col = st.selectbox("Select Column for Histogram", viz_numeric, key="hist_col")
         if hist_col:
-            fig_hist, ax_hist = plt.subplots(figsize=(plot_width, plot_height))
+            fig_hist, ax_hist = plt.subplots(figsize=viz_config["figsize"])
             if can_color_by_label:
                 for label_val, group in viz_df.groupby(color_col):
-                    ax_hist.hist(group[hist_col].dropna(), bins=hist_bins, alpha=0.6, label=str(label_val))
+                    ax_hist.hist(group[hist_col].dropna(), bins=viz_config["hist_bins"], alpha=0.6, label=str(label_val))
                 ax_hist.legend(title=color_col)
             else:
-                ax_hist.hist(viz_df[hist_col].dropna(), bins=hist_bins, alpha=0.8)
+                ax_hist.hist(viz_df[hist_col].dropna(), bins=viz_config["hist_bins"], alpha=0.8)
             ax_hist.set_xlabel(hist_col)
             ax_hist.set_ylabel("Frequency")
             ax_hist.set_title(f"Histogram of {hist_col}")
-            apply_plot_controls(ax_hist, zoom_pct, "Linear", apply_x=True, apply_y=False)
+            apply_plot_controls(ax_hist, viz_config, x_values=viz_df[hist_col], apply_x=True, apply_y=False)
             st.pyplot(fig_hist)
             download_fig_button(fig_hist, "dl_hist", "histogram.png")
 
@@ -797,7 +879,7 @@ if df is not None:
     if scatter_dim == "2D" and len(viz_numeric) >= 2:
         sx = st.selectbox("X-axis", viz_numeric, index=0, key="sx2d")
         sy = st.selectbox("Y-axis", viz_numeric, index=1, key="sy2d")
-        fig_sc, ax_sc = plt.subplots(figsize=(plot_width, plot_height))
+        fig_sc, ax_sc = plt.subplots(figsize=viz_config["figsize"])
         if can_color_by_label:
             for label_val, group in viz_df.groupby(color_col):
                 ax_sc.scatter(group[sx], group[sy], label=str(label_val), alpha=0.7)
@@ -807,7 +889,7 @@ if df is not None:
         ax_sc.set_xlabel(sx)
         ax_sc.set_ylabel(sy)
         ax_sc.set_title("2D Scatter Plot")
-        apply_plot_controls(ax_sc, zoom_pct, axis_scale)
+        apply_plot_controls(ax_sc, viz_config, x_values=viz_df[sx], y_values=viz_df[sy], apply_x=True, apply_y=True)
         st.pyplot(fig_sc)
         download_fig_button(fig_sc, "dl_sc2d", "scatter_2d.png")
 
@@ -815,7 +897,7 @@ if df is not None:
         sx3 = st.selectbox("X-axis", viz_numeric, index=0, key="sx3d")
         sy3 = st.selectbox("Y-axis", viz_numeric, index=1, key="sy3d")
         sz3 = st.selectbox("Z-axis", viz_numeric, index=2, key="sz3d")
-        fig3d = plt.figure(figsize=(plot_width, plot_height + 1))
+        fig3d = plt.figure(figsize=(viz_config["width"], viz_config["height"] + 1))
         ax3d = fig3d.add_subplot(111, projection="3d")
         if can_color_by_label:
             for label_val, group in viz_df.groupby(color_col):
@@ -827,6 +909,7 @@ if df is not None:
         ax3d.set_ylabel(sy3)
         ax3d.set_zlabel(sz3)
         ax3d.set_title("3D Scatter Plot")
+        apply_3d_zoom_controls(ax3d, viz_config, viz_df[sx3], viz_df[sy3], viz_df[sz3])
         st.pyplot(fig3d)
         download_fig_button(fig3d, "dl_sc3d", "scatter_3d.png")
     else:
@@ -838,17 +921,21 @@ if df is not None:
         "Select Features to Compare", viz_numeric, default=viz_plot_defaults[:min(4, len(viz_plot_defaults))]
     )
     if len(multi_cols) >= 2:
-        fig_mat, axes = plt.subplots(len(multi_cols), len(multi_cols), figsize=(max(3 * len(multi_cols), plot_width), max(3 * len(multi_cols), plot_height)))
+        fig_mat, axes = plt.subplots(len(multi_cols), len(multi_cols), figsize=(max(viz_config["width"], 2.6 * len(multi_cols)), max(viz_config["height"], 2.6 * len(multi_cols))))
         groups = list(viz_df.groupby(color_col)) if can_color_by_label else [(None, viz_df)]
         for i, ci in enumerate(multi_cols):
             for j, cj in enumerate(multi_cols):
                 ax = axes[i][j] if len(multi_cols) > 1 else axes
                 if i == j:
                     for label_val, group in groups:
-                        ax.hist(group[ci].dropna(), bins=hist_bins, alpha=0.6)
+                        ax.hist(group[ci].dropna(), bins=viz_config["hist_bins"], alpha=0.6)
                 else:
                     for label_val, group in groups:
                         ax.scatter(group[cj], group[ci], s=8, alpha=0.6)
+                if i == j:
+                    apply_plot_controls(ax, viz_config, x_values=viz_df[ci], apply_x=True, apply_y=False)
+                else:
+                    apply_plot_controls(ax, viz_config, x_values=viz_df[cj], y_values=viz_df[ci], apply_x=True, apply_y=True)
                 if j == 0:
                     ax.set_ylabel(ci, fontsize=8)
                 if i == len(multi_cols) - 1:
@@ -916,7 +1003,7 @@ st.markdown("---")
 # =========================================================
 # 3.1.6 PCA AND STATISTICAL ANALYSIS
 # =========================================================
-st.header("PCA and Statistical Analysis")
+st.header("3.1.6 PCA and Statistical Analysis")
 
 if df is not None:
     pca_source = st.radio(
@@ -1110,7 +1197,7 @@ st.markdown("---")
 # =========================================================
 # 3.1.8 EXPORT CAPABILITY
 # =========================================================
-st.header("Export Capability")
+st.header("3.1.8 Export Capability")
 
 export_options = ["Raw / Preprocessed Data", "Engineered Feature Set"]
 if st.session_state.selected_important_df is not None:
