@@ -1,1169 +1,808 @@
-import streamlit as st
-from theme import apply_theme
+"""ICAAV automated supervised-machine-learning workflow.
 
-apply_theme()
-import pandas as pd
-import numpy as np
+This page preserves the original classification/regression model choices,
+manual and automatic hyperparameter controls, evaluation plots, and model
+download. It adds the complete pipeline stages demonstrated by the real-estate
+and loan-eligibility reference applications: exploration, imputation,
+categorical encoding, scaling, reusable splitting, model comparison,
+cross-validation, model bundles, reload, and live prediction.
+"""
+
+from __future__ import annotations
+
 import ast
-import time
-import os
+from io import BytesIO
+
 import joblib
-
-
-
-
-from sklearn.model_selection import (
-    train_test_split, GridSearchCV, StratifiedKFold, KFold, cross_val_score
-)
-from sklearn.preprocessing import label_binarize, LabelEncoder
-from sklearn.metrics import (
-    accuracy_score, precision_score, recall_score, f1_score,
-    confusion_matrix, roc_auc_score, roc_curve, auc,
-    precision_recall_curve, average_precision_score,
-    mean_squared_error, mean_absolute_error, r2_score
-)
-from sklearn.svm import SVC, SVR
-from sklearn.ensemble import (
-    RandomForestClassifier, RandomForestRegressor,
-    GradientBoostingClassifier, GradientBoostingRegressor,
-    AdaBoostClassifier, AdaBoostRegressor,
-    ExtraTreesClassifier, ExtraTreesRegressor
-)
-from sklearn.linear_model import LogisticRegression, LinearRegression
-from sklearn.neighbors import KNeighborsClassifier, KNeighborsRegressor
-from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
-from sklearn.naive_bayes import GaussianNB
-from sklearn.neural_network import MLPClassifier
 import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
 import seaborn as sns
+import streamlit as st
+from sklearn.base import clone
+from sklearn.compose import ColumnTransformer
+from sklearn.ensemble import (
+    AdaBoostClassifier,
+    AdaBoostRegressor,
+    ExtraTreesClassifier,
+    ExtraTreesRegressor,
+    GradientBoostingClassifier,
+    GradientBoostingRegressor,
+    RandomForestClassifier,
+    RandomForestRegressor,
+)
+from sklearn.impute import SimpleImputer
+from sklearn.linear_model import LinearRegression, LogisticRegression
+from sklearn.metrics import (
+    accuracy_score,
+    confusion_matrix,
+    f1_score,
+    mean_absolute_error,
+    mean_squared_error,
+    precision_score,
+    r2_score,
+    recall_score,
+    roc_auc_score,
+)
+from sklearn.model_selection import GridSearchCV, cross_validate, train_test_split
+from sklearn.naive_bayes import GaussianNB
+from sklearn.neighbors import KNeighborsClassifier, KNeighborsRegressor
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.svm import SVC, SVR
+from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
 
-# ---------------------------------------------------------------------------
-# Optional TensorFlow / Keras support (CNN / RNN / LSTM — 3.2.1 Deep Learning)
-# ---------------------------------------------------------------------------
-try:
-    from tensorflow.keras.models import Sequential, load_model as keras_load_model
-    from tensorflow.keras.layers import (
-        Dense, Dropout, SimpleRNN, LSTM, Conv1D, GlobalMaxPooling1D, Reshape
-    )
-    from tensorflow.keras.optimizers import Adam
-    from tensorflow.keras.utils import to_categorical
-    from tensorflow.keras.callbacks import Callback
-    TF_AVAILABLE = True
-except Exception:
-    TF_AVAILABLE = False
+
+PREFIX = "icaav_sup_"
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+def state_key(name: str) -> str:
+    return f"{PREFIX}{name}"
+
+
 def parse_hyperparams(param_str: str) -> dict:
-    """Parse a 'key=value, key2=value2' string into a dict (kept from original app)."""
+    """Parse the original comma-separated manual hyperparameter format."""
     params = {}
     for item in param_str.split(","):
         item = item.strip()
-        if not item:
-            continue
-        if "=" not in item:
+        if not item or "=" not in item:
             continue
         key, value = item.split("=", 1)
-        key = key.strip()
-        value = value.strip()
         try:
-            params[key] = ast.literal_eval(value)
+            params[key.strip()] = ast.literal_eval(value.strip())
         except Exception:
-            params[key] = value
+            params[key.strip()] = value.strip()
     return params
 
 
-def confusion_derived_rates(cm: np.ndarray) -> dict:
-    """Macro-averaged TPR, FPR, FNR, TNR from an n-class confusion matrix (3.2.4)."""
-    n = cm.shape[0]
-    total = cm.sum()
-    tprs, fprs, fnrs, tnrs = [], [], [], []
-    for i in range(n):
-        TP = cm[i, i]
-        FN = cm[i, :].sum() - TP
-        FP = cm[:, i].sum() - TP
-        TN = total - TP - FN - FP
-        tprs.append(TP / (TP + FN) if (TP + FN) > 0 else 0.0)
-        fnrs.append(FN / (TP + FN) if (TP + FN) > 0 else 0.0)
-        fprs.append(FP / (FP + TN) if (FP + TN) > 0 else 0.0)
-        tnrs.append(TN / (FP + TN) if (FP + TN) > 0 else 0.0)
+def reset_downstream() -> None:
+    """Clear artifacts that are invalid after the dataset/setup changes."""
+    for name in [
+        "split", "trained_bundle", "comparison", "cv_results", "tuned_bundle",
+        "loaded_bundle", "prediction", "preparation",
+    ]:
+        st.session_state.pop(state_key(name), None)
+
+
+def infer_problem_type(y: pd.Series) -> str:
+    """Suggest classification for categorical or low-cardinality targets."""
+    if not pd.api.types.is_numeric_dtype(y):
+        return "Classification"
+    threshold = max(20, int(len(y) * 0.05))
+    return "Classification" if y.nunique(dropna=True) <= threshold else "Regression"
+
+
+def model_names(problem_type: str) -> list[str]:
+    if problem_type == "Classification":
+        return [
+            "Logistic Regression", "SVM", "Random Forest", "KNN",
+            "Decision Tree", "Naive Bayes", "Gradient Boosting",
+            "AdaBoost", "Extra Trees",
+        ]
+    return [
+        "Linear Regression", "Random Forest", "KNN", "Decision Tree", "SVR",
+        "Gradient Boosting", "AdaBoost", "Extra Trees",
+    ]
+
+
+def make_estimator(problem_type: str, name: str, params: dict | None = None):
+    """Create every estimator offered by the original ICAAV page."""
+    params = dict(params or {})
+    if problem_type == "Classification":
+        factories = {
+            "Logistic Regression": lambda: LogisticRegression(max_iter=2000, **params),
+            "SVM": lambda: SVC(probability=True, **params),
+            "Random Forest": lambda: RandomForestClassifier(random_state=42, **params),
+            "KNN": lambda: KNeighborsClassifier(**params),
+            "Decision Tree": lambda: DecisionTreeClassifier(random_state=42, **params),
+            "Naive Bayes": lambda: GaussianNB(**params),
+            "Gradient Boosting": lambda: GradientBoostingClassifier(random_state=42, **params),
+            "AdaBoost": lambda: AdaBoostClassifier(random_state=42, **params),
+            "Extra Trees": lambda: ExtraTreesClassifier(random_state=42, **params),
+        }
+    else:
+        factories = {
+            "Linear Regression": lambda: LinearRegression(**params),
+            "Random Forest": lambda: RandomForestRegressor(random_state=42, **params),
+            "KNN": lambda: KNeighborsRegressor(**params),
+            "Decision Tree": lambda: DecisionTreeRegressor(random_state=42, **params),
+            "SVR": lambda: SVR(**params),
+            "Gradient Boosting": lambda: GradientBoostingRegressor(random_state=42, **params),
+            "AdaBoost": lambda: AdaBoostRegressor(random_state=42, **params),
+            "Extra Trees": lambda: ExtraTreesRegressor(random_state=42, **params),
+        }
+    return factories[name]()
+
+
+def default_grid(problem_type: str, name: str) -> dict:
+    """Small, deployment-friendly grids for the original auto-tune option."""
+    common = {
+        "Random Forest": {
+            "model__n_estimators": [50, 100, 200],
+            "model__max_depth": [None, 5, 10],
+        },
+        "KNN": {
+            "model__n_neighbors": [3, 5, 7],
+            "model__weights": ["uniform", "distance"],
+        },
+        "Decision Tree": {
+            "model__max_depth": [None, 3, 5, 10],
+            "model__min_samples_split": [2, 5, 10],
+        },
+        "Gradient Boosting": {
+            "model__n_estimators": [50, 100],
+            "model__learning_rate": [0.01, 0.1],
+        },
+        "AdaBoost": {
+            "model__n_estimators": [50, 100, 200],
+            "model__learning_rate": [0.01, 0.1, 1.0],
+        },
+        "Extra Trees": {
+            "model__n_estimators": [50, 100, 200],
+            "model__max_depth": [None, 5, 10],
+        },
+    }
+    if name in common:
+        return common[name]
+    if name == "Logistic Regression":
+        return {"model__C": [0.01, 0.1, 1.0, 10.0]}
+    if name in {"SVM", "SVR"}:
+        return {"model__C": [0.1, 1.0, 10.0], "model__kernel": ["rbf", "linear"]}
+    return {}
+
+
+def build_preprocessor(
+    numeric_cols: list[str],
+    categorical_cols: list[str],
+    numeric_strategy: str,
+    categorical_strategy: str,
+    scale_numeric: bool,
+):
+    numeric_steps = [("imputer", SimpleImputer(strategy=numeric_strategy))]
+    if scale_numeric:
+        numeric_steps.append(("scaler", StandardScaler()))
+    numeric_pipe = Pipeline(numeric_steps)
+    categorical_pipe = Pipeline(
+        [
+            ("imputer", SimpleImputer(strategy=categorical_strategy)),
+            ("encoder", OneHotEncoder(handle_unknown="ignore", sparse_output=False)),
+        ]
+    )
+    transformers = []
+    if numeric_cols:
+        transformers.append(("numeric", numeric_pipe, numeric_cols))
+    if categorical_cols:
+        transformers.append(("categorical", categorical_pipe, categorical_cols))
+    return ColumnTransformer(transformers=transformers, remainder="drop")
+
+
+def build_model_pipeline(split: dict, name: str, params: dict | None = None) -> Pipeline:
+    prep = build_preprocessor(
+        split["numeric_cols"], split["categorical_cols"],
+        split["numeric_strategy"], split["categorical_strategy"],
+        split["scale_numeric"],
+    )
+    return Pipeline([("preprocessor", prep), ("model", make_estimator(split["problem_type"], name, params))])
+
+
+def classification_metrics(y_true, y_pred, model=None, X=None) -> dict:
+    metrics = {
+        "Accuracy": accuracy_score(y_true, y_pred),
+        "Precision": precision_score(y_true, y_pred, average="weighted", zero_division=0),
+        "Recall": recall_score(y_true, y_pred, average="weighted", zero_division=0),
+        "F1": f1_score(y_true, y_pred, average="weighted", zero_division=0),
+    }
+    if model is not None and X is not None and pd.Series(y_true).nunique() == 2:
+        try:
+            score = model.predict_proba(X)[:, 1]
+            metrics["ROC AUC"] = roc_auc_score(y_true, score)
+        except Exception:
+            pass
+    return metrics
+
+
+def regression_metrics(y_true, y_pred) -> dict:
+    mse = mean_squared_error(y_true, y_pred)
     return {
-        "TPR": float(np.mean(tprs)),
-        "FPR": float(np.mean(fprs)),
-        "FNR": float(np.mean(fnrs)),
-        "TNR": float(np.mean(tnrs)),
+        "MSE": mse,
+        "RMSE": float(np.sqrt(mse)),
+        "MAE": mean_absolute_error(y_true, y_pred),
+        "R2": r2_score(y_true, y_pred),
     }
 
 
-def plot_roc_curve(y_test, y_score, classes):
-    """ROC curve(s) + AUC, binary or multiclass one-vs-rest (3.2.4)."""
-    fig, ax = plt.subplots(figsize=(5.5, 5))
-    auc_scores = {}
-    n_classes = len(classes)
-    if n_classes == 2:
-        fpr, tpr, _ = roc_curve(y_test, y_score[:, 1], pos_label=classes[1])
-        roc_auc = auc(fpr, tpr)
-        ax.plot(fpr, tpr, color="#B31B1B", lw=2, label=f"ROC (AUC = {roc_auc:.3f})")
-        auc_scores["overall"] = roc_auc
+def score_model(problem_type: str, model, X, y) -> tuple[dict, np.ndarray]:
+    prediction = model.predict(X)
+    if problem_type == "Classification":
+        return classification_metrics(y, prediction, model, X), prediction
+    return regression_metrics(y, prediction), prediction
+
+
+def bundle_bytes(bundle: dict) -> bytes:
+    buffer = BytesIO()
+    joblib.dump(bundle, buffer)
+    return buffer.getvalue()
+
+
+def show_metric_cards(metrics: dict) -> None:
+    columns = st.columns(min(5, len(metrics)))
+    for index, (label, value) in enumerate(metrics.items()):
+        columns[index % len(columns)].metric(label, f"{value:.4f}")
+
+
+def render_evaluation(bundle: dict) -> None:
+    split = bundle["split"]
+    metrics = bundle["test_metrics"]
+    prediction = bundle["test_prediction"]
+    show_metric_cards(metrics)
+    if split["problem_type"] == "Classification":
+        st.subheader("Confusion Matrix")
+        labels = np.unique(np.concatenate([np.asarray(split["y_test"]), np.asarray(prediction)]))
+        cm = confusion_matrix(split["y_test"], prediction, labels=labels)
+        fig, ax = plt.subplots(figsize=(6, 4))
+        sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", xticklabels=labels, yticklabels=labels, ax=ax)
+        ax.set_xlabel("Predicted")
+        ax.set_ylabel("True")
+        st.pyplot(fig)
     else:
-        y_test_bin = label_binarize(y_test, classes=classes)
-        for i, c in enumerate(classes):
-            fpr, tpr, _ = roc_curve(y_test_bin[:, i], y_score[:, i])
-            roc_auc = auc(fpr, tpr)
-            auc_scores[str(c)] = roc_auc
-            ax.plot(fpr, tpr, lw=1.5, label=f"Class {c} (AUC = {roc_auc:.3f})")
-        fpr_micro, tpr_micro, _ = roc_curve(y_test_bin.ravel(), y_score.ravel())
-        micro_auc = auc(fpr_micro, tpr_micro)
-        auc_scores["micro-average"] = micro_auc
-        ax.plot(fpr_micro, tpr_micro, "k--", lw=2, label=f"Micro-average (AUC = {micro_auc:.3f})")
-    ax.plot([0, 1], [0, 1], color="gray", linestyle=":", label="Chance")
-    ax.set_xlim([0.0, 1.0])
-    ax.set_ylim([0.0, 1.05])
-    ax.set_xlabel("False Positive Rate")
-    ax.set_ylabel("True Positive Rate")
-    ax.set_title("ROC Curve")
-    ax.legend(loc="lower right", fontsize=8)
-    fig.tight_layout()
-    return fig, auc_scores
-
-
-def plot_pr_curve(y_test, y_score, classes):
-    """Precision-Recall curve(s), mirrors the MATLAB Classification Learner PR plot."""
-    fig, ax = plt.subplots(figsize=(5.5, 5))
-    n_classes = len(classes)
-    if n_classes == 2:
-        precision, recall, _ = precision_recall_curve(y_test, y_score[:, 1], pos_label=classes[1])
-        ap = average_precision_score(y_test == classes[1], y_score[:, 1])
-        ax.plot(recall, precision, color="#B31B1B", lw=2, label=f"PR (AP = {ap:.3f})")
-    else:
-        y_test_bin = label_binarize(y_test, classes=classes)
-        for i, c in enumerate(classes):
-            precision, recall, _ = precision_recall_curve(y_test_bin[:, i], y_score[:, i])
-            ap = average_precision_score(y_test_bin[:, i], y_score[:, i])
-            ax.plot(recall, precision, lw=1.5, label=f"Class {c} (AP = {ap:.3f})")
-    ax.set_xlabel("Recall (True Positive Rate)")
-    ax.set_ylabel("Precision (Positive Predictive Value)")
-    ax.set_title("Precision-Recall Curve")
-    ax.legend(loc="lower left", fontsize=8)
-    fig.tight_layout()
-    return fig
-
-
-def plot_prediction_visualization(y_test, y_pred, classes):
-    """Prediction visualization plot required by 3.2.4: predicted vs actual class counts
-    plus a per-sample correctness scatter."""
-    fig, axes = plt.subplots(1, 2, figsize=(11, 4.2))
-
-    # Predicted vs actual counts per class
-    true_counts = pd.Series(y_test).value_counts().reindex(classes, fill_value=0)
-    pred_counts = pd.Series(y_pred).value_counts().reindex(classes, fill_value=0)
-    x = np.arange(len(classes))
-    width = 0.35
-    axes[0].bar(x - width / 2, true_counts.values, width, label="Actual", color="#4C72B0")
-    axes[0].bar(x + width / 2, pred_counts.values, width, label="Predicted", color="#B31B1B")
-    axes[0].set_xticks(x)
-    axes[0].set_xticklabels([str(c) for c in classes], rotation=45, ha="right")
-    axes[0].set_ylabel("Count")
-    axes[0].set_title("Predicted vs Actual (class counts)")
-    axes[0].legend()
-
-    # Per-sample correctness scatter (first up to 200 test samples)
-    n_show = min(200, len(y_test))
-    idx = np.arange(n_show)
-    y_test_arr = np.asarray(y_test)[:n_show]
-    y_pred_arr = np.asarray(y_pred)[:n_show]
-    correct = y_test_arr == y_pred_arr
-    axes[1].scatter(idx[correct], idx[correct] * 0 + 1, color="#4C72B0", s=14, label="Correct")
-    axes[1].scatter(idx[~correct], idx[~correct] * 0, color="#B31B1B", s=14, label="Incorrect")
-    axes[1].set_yticks([0, 1])
-    axes[1].set_yticklabels(["Incorrect", "Correct"])
-    axes[1].set_xlabel("Test sample index")
-    axes[1].set_title("Prediction Correctness (sample view)")
-    axes[1].legend(loc="center right")
-
-    fig.tight_layout()
-    return fig
+        st.subheader("Predicted vs. Actual")
+        fig, ax = plt.subplots(figsize=(6, 4))
+        ax.scatter(split["y_test"], prediction, alpha=0.7)
+        lower = min(np.min(split["y_test"]), np.min(prediction))
+        upper = max(np.max(split["y_test"]), np.max(prediction))
+        ax.plot([lower, upper], [lower, upper], "r--")
+        ax.set_xlabel("Actual")
+        ax.set_ylabel("Predicted")
+        st.pyplot(fig)
+    preview = pd.DataFrame({"Actual": np.asarray(split["y_test"]), "Predicted": prediction})
+    st.dataframe(preview.head(25), use_container_width=True)
 
 
 # ---------------------------------------------------------------------------
-# Keras (deep learning) helpers — used only when TensorFlow is available
+# Branding header - preserved ICAAV/Carleton visual identity.
 # ---------------------------------------------------------------------------
-if TF_AVAILABLE:
-    class TimeoutCallback(Callback):
-        """Stops training once a wall-clock timeout threshold is exceeded (3.2.2)."""
-        def __init__(self, timeout_seconds):
-            super().__init__()
-            self.timeout_seconds = timeout_seconds
-            self.start_time = None
-
-        def on_train_begin(self, logs=None):
-            self.start_time = time.time()
-
-        def on_epoch_end(self, epoch, logs=None):
-            if self.timeout_seconds and (time.time() - self.start_time) > self.timeout_seconds:
-                self.model.stop_training = True
-
-    class LossThresholdCallback(Callback):
-        """Stops training once the training loss falls at/below a target threshold (3.2.2)."""
-        def __init__(self, threshold):
-            super().__init__()
-            self.threshold = threshold
-
-        def on_epoch_end(self, epoch, logs=None):
-            loss_val = logs.get("loss") if logs else None
-            if self.threshold is not None and loss_val is not None and loss_val <= self.threshold:
-                self.model.stop_training = True
-
-    class StProgressCallback(Callback):
-        """Live training-progress indicator (3.2.3 Visualization)."""
-        def __init__(self, epochs, progress_bar, status_text):
-            super().__init__()
-            self.epochs = epochs
-            self.progress_bar = progress_bar
-            self.status_text = status_text
-
-        def on_epoch_end(self, epoch, logs=None):
-            pct = min(1.0, (epoch + 1) / max(self.epochs, 1))
-            self.progress_bar.progress(pct)
-            loss_val = logs.get("loss", float("nan"))
-            acc_val = logs.get("accuracy", logs.get("acc", float("nan")))
-            val_loss = logs.get("val_loss")
-            msg = f"Epoch {epoch + 1}/{self.epochs} — loss: {loss_val:.4f}, accuracy: {acc_val:.4f}"
-            if val_loss is not None:
-                msg += f", val_loss: {val_loss:.4f}"
-            self.status_text.text(msg)
-
-    def build_keras_model(kind, input_dim, num_classes, learning_rate):
-        model = Sequential()
-        if kind == "CNN (optional)":
-            model.add(Reshape((input_dim, 1), input_shape=(input_dim,)))
-            model.add(Conv1D(32, kernel_size=3, activation="relu", padding="same"))
-            model.add(Conv1D(64, kernel_size=3, activation="relu", padding="same"))
-            model.add(GlobalMaxPooling1D())
-            model.add(Dense(32, activation="relu"))
-        elif kind == "RNN":
-            model.add(Reshape((input_dim, 1), input_shape=(input_dim,)))
-            model.add(SimpleRNN(32))
-            model.add(Dense(32, activation="relu"))
-        elif kind == "LSTM":
-            model.add(Reshape((input_dim, 1), input_shape=(input_dim,)))
-            model.add(LSTM(32))
-            model.add(Dense(32, activation="relu"))
-        else:  # Fallback dense body
-            model.add(Dense(64, activation="relu", input_shape=(input_dim,)))
-            model.add(Dropout(0.2))
-            model.add(Dense(32, activation="relu"))
-
-        if num_classes == 2:
-            model.add(Dense(1, activation="sigmoid"))
-            loss = "binary_crossentropy"
-        else:
-            model.add(Dense(num_classes, activation="softmax"))
-            loss = "categorical_crossentropy"
-
-        model.compile(optimizer=Adam(learning_rate=learning_rate), loss=loss, metrics=["accuracy"])
-        return model, loss
-
-
-# ---------------------------------------------------------------------------
-# Session state
-# ---------------------------------------------------------------------------
-st.session_state.setdefault("trained_models", {})   # run_label -> {model, is_keras, meta}
-st.session_state.setdefault("training_runs", [])     # list of metric dicts for comparison table
-st.session_state.setdefault("active_run", None)      # currently selected run label for export/testing
-st.session_state.setdefault("loaded_pretrained", None)  # externally loaded model info
-
-
-# ---------------------------------------------------------------------------
-# Header
-# ---------------------------------------------------------------------------
-col1, col2, col3 = st.columns([1, 3, 1])
-
-with col1:
-    st.image("assets/icaav_logo.png", width=100)
-
-with col2:
+left, middle, right = st.columns([1, 3, 1])
+with left:
+    try:
+        st.image("assets/icaav_logo.png", width=100)
+    except Exception:
+        st.markdown("**iCAAV**")
+with middle:
     st.markdown(
         """
-        <div class="icaav-page-title">
-            Tab 2 — Supervised Machine Learning
-        </div>
-
-        <div class="icaav-page-subtitle">
-            Intelligent Connected Assistive & Autonomous Vehicles (iCAAV) Core
-            <br>Advanced Biomechatronics and Locomotion Laboratory
-            <br>Carleton University
-        </div>
+        <h2 style='text-align:center;color:#B31B1B;margin-bottom:0.2rem;'>
+            Automated Supervised Machine Learning Pipeline
+        </h2>
+        <p style='text-align:center;color:gray;margin-top:0;'>
+            Classification • Regression • Evaluation • Prediction
+            <br>iCAAV Core • Carleton University
+        </p>
         """,
         unsafe_allow_html=True,
     )
-
-with col3:
-    st.image("assets/carleton_logo.png", width=100)
+with right:
+    try:
+        st.image("assets/carleton_logo.png", width=100)
+    except Exception:
+        st.markdown("**Carleton**")
 
 st.markdown("---")
 
 
+tabs = st.tabs(
+    [
+        "1. Data Import & Explore",
+        "2. Data Preparation",
+        "3. Train / Test Split",
+        "4. Model Training",
+        "5. Model Comparison",
+        "6. Validation & Tuning",
+        "7. Save, Load & Predict",
+    ]
+)
 
-# ===========================================================================
-# 1. Load Engineered Dataset
-# ===========================================================================
-st.header("1. Load Engineered Dataset")
-uploaded = st.file_uploader("Upload engineered dataset (CSV)", type=["csv"])
 
-if uploaded is not None:
-    df = pd.read_csv(uploaded)
-    st.dataframe(df.head())
+# ---------------------------------------------------------------------------
+# 1. Data Import & Explore
+# ---------------------------------------------------------------------------
+with tabs[0]:
+    st.header("1. Data Import and Exploration")
+    uploaded = st.file_uploader("Upload a supervised-learning dataset (CSV)", type=["csv"], key=state_key("upload"))
 
-    target_col = st.selectbox("Select label/target column", df.columns)
-    feature_cols = st.multiselect(
-        "Select feature columns",
-        [c for c in df.columns if c != target_col],
-        default=[c for c in df.columns if c != target_col]
-    )
+    if uploaded is not None:
+        source_id = f"{uploaded.name}:{uploaded.size}"
+        if st.session_state.get(state_key("source_id")) != source_id:
+            try:
+                df = pd.read_csv(uploaded)
+                st.session_state[state_key("df")] = df
+                st.session_state[state_key("source_id")] = source_id
+                reset_downstream()
+            except Exception as exc:
+                st.error(f"Could not read the CSV file: {exc}")
 
-    st.subheader("Model Type")
-    model_family = st.radio(
-        "Choose the model type",
-        ["Classical ML", "Deep Learning"],
-        horizontal=True,
-        help=(
-            "Classical ML offers Classification and Regression algorithms "
-            "(SVM, KNN, Decision Tree, Random Forest, Logistic Regression, Naive Bayes, etc.). "
-            "Deep Learning offers neural network architectures (FNN, CNN, RNN, LSTM)."
-        )
-    )
-
-    problem_type = st.selectbox("Problem type", ["Classification", "Regression"], index=1)
-
-    X = df[feature_cols]
-    y = df[target_col]
-
-    if X.select_dtypes(include=[np.number]).shape[1] != X.shape[1]:
-        st.error("Selected features must all be numeric. Remove text/categorical columns or encode them before training.")
-    elif problem_type == "Classification" and y.nunique() < 2:
-        st.error("Target column must contain at least two classes. Select a different target column or provide a dataset with multiple classes.")
-    elif problem_type == "Regression" and not np.issubdtype(y.dtype, np.number):
-        st.error("Regression target must be numeric. Select a continuous target column like price.")
+    df = st.session_state.get(state_key("df"))
+    if df is None:
+        st.info("Upload a CSV dataset to begin the automated pipeline.")
     else:
-        if problem_type == "Classification":
-            if y.dtype.kind in "bifc" and y.nunique() > 20:
-                st.warning(
-                    "The selected target appears to be continuous. "
-                    "Classification works best with categorical labels."
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Rows", f"{len(df):,}")
+        c2.metric("Columns", f"{df.shape[1]:,}")
+        c3.metric("Missing values", f"{int(df.isna().sum().sum()):,}")
+        c4.metric("Duplicate rows", f"{int(df.duplicated().sum()):,}")
+        st.subheader("Dataset Preview")
+        st.dataframe(df.head(20), use_container_width=True)
+        with st.expander("Data types and non-null counts"):
+            info = pd.DataFrame({
+                "Data type": df.dtypes.astype(str),
+                "Non-null": df.notna().sum(),
+                "Missing": df.isna().sum(),
+                "Unique": df.nunique(dropna=True),
+            })
+            st.dataframe(info, use_container_width=True)
+        with st.expander("Descriptive statistics"):
+            st.dataframe(df.describe(include="all").transpose(), use_container_width=True)
+
+        target = st.selectbox("Select label/target column", df.columns, key=state_key("target_widget"))
+        available_features = [column for column in df.columns if column != target]
+        features = st.multiselect(
+            "Select feature columns",
+            available_features,
+            default=available_features,
+            key=state_key("features_widget"),
+        )
+        suggestion = infer_problem_type(df[target])
+        problem = st.selectbox(
+            "Problem type",
+            ["Classification", "Regression"],
+            index=0 if suggestion == "Classification" else 1,
+            key=state_key("problem_widget"),
+            help=f"Suggested from the target: {suggestion}",
+        )
+        setup = {"target": target, "features": features, "problem_type": problem}
+        if st.session_state.get(state_key("setup")) != setup:
+            st.session_state[state_key("setup")] = setup
+            reset_downstream()
+
+        if not features:
+            st.warning("Select at least one feature column.")
+        elif problem == "Classification" and df[target].dropna().nunique() < 2:
+            st.error("Classification requires at least two target classes.")
+        elif problem == "Regression" and not pd.api.types.is_numeric_dtype(df[target]):
+            st.error("Regression requires a numeric target column.")
+        else:
+            st.success(f"Configured {problem.lower()} with {len(features)} feature(s).")
+
+
+# ---------------------------------------------------------------------------
+# 2. Data Preparation
+# ---------------------------------------------------------------------------
+with tabs[1]:
+    st.header("2. Data Preparation")
+    df = st.session_state.get(state_key("df"))
+    setup = st.session_state.get(state_key("setup"))
+    if df is None or not setup or not setup["features"]:
+        st.info("Complete Step 1 first.")
+    else:
+        selected = df[setup["features"]]
+        numeric_cols = selected.select_dtypes(include=[np.number, "bool"]).columns.tolist()
+        categorical_cols = [column for column in setup["features"] if column not in numeric_cols]
+
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Numeric features", len(numeric_cols))
+        c2.metric("Categorical features", len(categorical_cols))
+        c3.metric("Rows with missing inputs", int(selected.isna().any(axis=1).sum()))
+
+        st.subheader("Missing-Value Analysis")
+        missing = pd.DataFrame({
+            "Missing count": selected.isna().sum(),
+            "Missing percent": (selected.isna().mean() * 100).round(2),
+        })
+        st.dataframe(missing, use_container_width=True)
+
+        col1, col2, col3 = st.columns(3)
+        numeric_strategy = col1.selectbox("Numeric imputation", ["median", "mean", "most_frequent"], key=state_key("num_impute"))
+        categorical_strategy = col2.selectbox("Categorical imputation", ["most_frequent", "constant"], key=state_key("cat_impute"))
+        scale_numeric = col3.checkbox("Standardize numeric features", value=True, key=state_key("scale"))
+        drop_duplicates = st.checkbox("Remove duplicate rows before splitting", value=True, key=state_key("drop_duplicates"))
+
+        preparation = {
+            "numeric_cols": numeric_cols,
+            "categorical_cols": categorical_cols,
+            "numeric_strategy": numeric_strategy,
+            "categorical_strategy": categorical_strategy,
+            "scale_numeric": scale_numeric,
+            "drop_duplicates": drop_duplicates,
+        }
+        if st.session_state.get(state_key("preparation")) != preparation:
+            st.session_state[state_key("preparation")] = preparation
+            for name in ["split", "trained_bundle", "comparison", "cv_results", "tuned_bundle", "prediction"]:
+                st.session_state.pop(state_key(name), None)
+
+        st.subheader("Automatic Pipeline Preview")
+        st.write(f"Numeric: impute with **{numeric_strategy}**" + (" and standardize." if scale_numeric else "."))
+        st.write(f"Categorical: impute with **{categorical_strategy}** and one-hot encode unknown-safe categories.")
+        st.caption("The preprocessor is fitted only on training data to reduce leakage.")
+
+
+# ---------------------------------------------------------------------------
+# 3. Train/Test Split
+# ---------------------------------------------------------------------------
+with tabs[2]:
+    st.header("3. Train / Test Split")
+    df = st.session_state.get(state_key("df"))
+    setup = st.session_state.get(state_key("setup"))
+    preparation = st.session_state.get(state_key("preparation"))
+    if df is None or not setup or not preparation:
+        st.info("Complete Steps 1 and 2 first.")
+    else:
+        c1, c2 = st.columns(2)
+        test_size = c1.slider("Test size (%)", 10, 40, 20, key=state_key("test_size")) / 100
+        random_state = c2.number_input("Random state", min_value=0, value=42, step=1, key=state_key("random_state"))
+        stratify = st.checkbox(
+            "Stratify classification targets when possible",
+            value=True,
+            disabled=setup["problem_type"] != "Classification",
+            key=state_key("stratify"),
+        )
+
+        if st.button("Split the Dataset", type="primary", key=state_key("split_button")):
+            try:
+                working = df[setup["features"] + [setup["target"]]].copy()
+                working = working.dropna(subset=[setup["target"]])
+                if preparation["drop_duplicates"]:
+                    working = working.drop_duplicates()
+                X = working[setup["features"]]
+                y = working[setup["target"]]
+                stratify_values = None
+                if setup["problem_type"] == "Classification" and stratify and y.value_counts().min() >= 2:
+                    stratify_values = y
+                X_train, X_test, y_train, y_test = train_test_split(
+                    X, y, test_size=test_size, random_state=int(random_state), stratify=stratify_values
                 )
+                split = {
+                    **setup, **preparation,
+                    "X_train": X_train, "X_test": X_test,
+                    "y_train": y_train, "y_test": y_test,
+                    "test_size": test_size, "random_state": int(random_state),
+                }
+                st.session_state[state_key("split")] = split
+                for name in ["trained_bundle", "comparison", "cv_results", "tuned_bundle", "prediction"]:
+                    st.session_state.pop(state_key(name), None)
+                st.success("Dataset split successfully.")
+            except Exception as exc:
+                st.error(f"Could not split the dataset: {exc}")
 
-        # -------------------------------------------------------------
-        # 3.2.2 Training Configuration — Train / Validation / Test split
-        # -------------------------------------------------------------
-        st.header("2. Training Configuration")
-        st.subheader("2.1 Train / Validation / Test Split")
+        split = st.session_state.get(state_key("split"))
+        if split:
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Training rows", f"{len(split['X_train']):,}")
+            c2.metric("Testing rows", f"{len(split['X_test']):,}")
+            c3.metric("Features", len(split["features"]))
+            c4.metric("Target classes", split["y_train"].nunique() if split["problem_type"] == "Classification" else "Continuous")
+            if split["problem_type"] == "Classification":
+                counts = pd.concat(
+                    [split["y_train"].value_counts(normalize=True).rename("Train share"),
+                     split["y_test"].value_counts(normalize=True).rename("Test share")], axis=1
+                ).fillna(0)
+                st.dataframe(counts, use_container_width=True)
 
-        split_c1, split_c2 = st.columns(2)
-        with split_c1:
-            test_size = st.slider("Test size (%)", 10, 40, 20) / 100
-        with split_c2:
-            val_size_of_remaining = st.slider(
-                "Validation size (% of remaining after test split)", 0, 40, 15
-            ) / 100
 
-        random_state = 42
+# ---------------------------------------------------------------------------
+# 4. Model Training
+# ---------------------------------------------------------------------------
+with tabs[3]:
+    st.header("4. Model Selection and Training")
+    split = st.session_state.get(state_key("split"))
+    if split is None:
+        st.info("Create the train/test split in Step 3 first.")
+    else:
+        name = st.selectbox("Choose model", model_names(split["problem_type"]), key=state_key("model_name"))
+        training_mode = st.selectbox("Training mode", ["Manual", "Auto-tune hyperparameters"], key=state_key("training_mode"))
 
-        try:
-            if problem_type == "Classification":
-                X_trainval, X_test, y_trainval, y_test = train_test_split(
-                    X, y, test_size=test_size, random_state=random_state, stratify=y
-                )
-                if val_size_of_remaining > 0:
-                    X_train, X_val, y_train, y_val = train_test_split(
-                        X_trainval, y_trainval, test_size=val_size_of_remaining,
-                        random_state=random_state, stratify=y_trainval
-                    )
+        ui_params = {}
+        if training_mode == "Manual":
+            with st.expander("Set hyperparameters for selected model (optional)", expanded=True):
+                if name in {"Random Forest", "Extra Trees"}:
+                    ui_params["n_estimators"] = st.slider("n_estimators", 10, 500, 100, key=state_key("trees"))
+                    depth = st.selectbox("max_depth", ["None", 3, 5, 10, 20], key=state_key("depth"))
+                    ui_params["max_depth"] = None if depth == "None" else int(depth)
+                    ui_params["min_samples_split"] = int(st.number_input("min_samples_split", 2, 100, 2, key=state_key("min_split")))
+                elif name == "KNN":
+                    ui_params["n_neighbors"] = st.slider("n_neighbors", 1, 50, 5, key=state_key("neighbors"))
+                    ui_params["weights"] = st.selectbox("weights", ["uniform", "distance"], key=state_key("weights"))
+                    ui_params["metric"] = st.selectbox("metric", ["minkowski", "euclidean", "manhattan"], key=state_key("metric"))
+                elif name == "Decision Tree":
+                    if split["problem_type"] == "Classification":
+                        ui_params["criterion"] = st.selectbox("criterion", ["gini", "entropy", "log_loss"], key=state_key("criterion"))
+                    depth = st.selectbox("max_depth", ["None", 3, 5, 10, 20], key=state_key("tree_depth"))
+                    ui_params["max_depth"] = None if depth == "None" else int(depth)
+                    ui_params["min_samples_leaf"] = int(st.number_input("min_samples_leaf", 1, 100, 1, key=state_key("min_leaf")))
+                elif name in {"SVM", "SVR"}:
+                    ui_params["C"] = st.number_input("C", 0.01, 100.0, 1.0, key=state_key("C"))
+                    ui_params["kernel"] = st.selectbox("kernel", ["rbf", "linear", "poly"], key=state_key("kernel"))
+                    if name == "SVR":
+                        ui_params["epsilon"] = st.number_input("epsilon", 0.0, 1.0, 0.1, key=state_key("epsilon"))
+                elif name in {"Gradient Boosting", "AdaBoost"}:
+                    ui_params["learning_rate"] = st.number_input("learning_rate", 0.001, 1.0, 0.1, key=state_key("learning_rate"))
+                    ui_params["n_estimators"] = st.slider("n_estimators", 10, 500, 100, key=state_key("boost_estimators"))
+
+            manual_text = st.text_input(
+                "Advanced manual hyperparameters",
+                help="Comma-separated values such as C=1.0, max_depth=5. These override the widgets.",
+                key=state_key("manual_text"),
+            )
+            ui_params.update(parse_hyperparams(manual_text))
+
+        if st.button("Train Model", type="primary", key=state_key("train_button")):
+            try:
+                pipeline = build_model_pipeline(split, name, ui_params if training_mode == "Manual" else None)
+                best_params = None
+                if training_mode == "Auto-tune hyperparameters" and default_grid(split["problem_type"], name):
+                    scoring = "accuracy" if split["problem_type"] == "Classification" else "r2"
+                    search = GridSearchCV(pipeline, default_grid(split["problem_type"], name), cv=3, scoring=scoring, n_jobs=-1)
+                    search.fit(split["X_train"], split["y_train"])
+                    pipeline = search.best_estimator_
+                    best_params = search.best_params_
                 else:
-                    X_train, y_train = X_trainval, y_trainval
-                    X_val, y_val = None, None
-            else:
-                X_trainval, X_test, y_trainval, y_test = train_test_split(
-                    X, y, test_size=test_size, random_state=random_state
-                )
-                if val_size_of_remaining > 0:
-                    X_train, X_val, y_train, y_val = train_test_split(
-                        X_trainval, y_trainval, test_size=val_size_of_remaining,
-                        random_state=random_state
-                    )
-                else:
-                    X_train, y_train = X_trainval, y_trainval
-                    X_val, y_val = None, None
-        except ValueError as e:
-            if problem_type == "Classification":
-                st.error("Please select appropriate target variable.")
-            else:
-                st.error("Unable to split the dataset. Check the target and feature selection.")
-            st.write("Detailed error:", e)
-            X_train = X_test = y_train = y_test = None
-            X_val = y_val = None
+                    pipeline.fit(split["X_train"], split["y_train"])
+                train_metrics, train_prediction = score_model(split["problem_type"], pipeline, split["X_train"], split["y_train"])
+                test_metrics, test_prediction = score_model(split["problem_type"], pipeline, split["X_test"], split["y_test"])
+                bundle = {
+                    "model": pipeline, "model_name": name, "problem_type": split["problem_type"],
+                    "target": split["target"], "feature_cols": split["features"],
+                    "train_metrics": train_metrics, "test_metrics": test_metrics,
+                    "train_prediction": train_prediction, "test_prediction": test_prediction,
+                    "best_params": best_params, "split": split,
+                    "feature_examples": st.session_state[state_key("df")][split["features"]].copy(),
+                }
+                st.session_state[state_key("trained_bundle")] = bundle
+                # Compatibility with the original Page 3 transfer workflow.
+                st.session_state["trained"] = {
+                    "model": pipeline, "model_name": name, "problem_type": split["problem_type"],
+                    "feature_cols": split["features"], "X_test": split["X_test"], "y_test": split["y_test"],
+                }
+                st.success("Model trained successfully.")
+            except Exception as exc:
+                st.error(f"Training failed: {exc}")
 
-        if X_train is not None:
-            shape_msg = f"Train shape: {X_train.shape}, Test shape: {X_test.shape}"
-            if X_val is not None:
-                shape_msg += f", Validation shape: {X_val.shape}"
-            st.write(shape_msg)
+        trained = st.session_state.get(state_key("trained_bundle"))
+        if trained:
+            if trained.get("best_params"):
+                st.write("**Best hyperparameters:**", trained["best_params"])
+            st.subheader("Training Metrics")
+            show_metric_cards(trained["train_metrics"])
+            st.subheader("Testing-Set Performance")
+            render_evaluation(trained)
 
-            # -------------------------------------------------------------
-            # 3.2.2 Cross-Validation (Classical ML) / Deep Learning Training Controls
-            # -------------------------------------------------------------
-            if model_family == "Classical ML":
-                st.subheader("2.2 Cross-Validation")
-                cv_col1, cv_col2 = st.columns(2)
-                with cv_col1:
-                    use_cv = st.checkbox("Enable cross-validation", value=False)
-                with cv_col2:
-                    cv_folds = st.slider("Number of folds (k)", 2, 10, 5, disabled=not use_cv)
-            else:
-                use_cv = False
-                cv_folds = 5
-                st.subheader("2.2 Deep Learning Training Controls")
-                st.caption("Epoch limit, loss threshold, timeout, batch size and learning rate for the Deep Learning model configured below.")
-                dl_c1, dl_c2, dl_c3 = st.columns(3)
-                with dl_c1:
-                    epoch_limit = st.number_input("Epoch limit", 1, 2000, 50)
-                    batch_size = st.number_input("Batch size", 1, 1024, 32)
-                with dl_c2:
-                    learning_rate_dl = st.number_input(
-                        "Learning rate", min_value=0.00001, max_value=1.0, value=0.001,
-                        step=0.0001, format="%.5f"
-                    )
-                    loss_threshold = st.number_input(
-                        "Loss threshold (stop when training loss ≤ this value)",
-                        min_value=0.0, max_value=10.0, value=0.0, step=0.01,
-                        help="Set to 0 to disable early stopping on loss threshold."
-                    )
-                with dl_c3:
-                    timeout_threshold = st.number_input(
-                        "Timeout threshold (seconds, 0 = no limit)", 0, 36000, 0
-                    )
-                    early_stopping_patience = st.number_input(
-                        "Early-stopping patience (epochs, 0 = disabled)", 0, 200, 10
-                    )
 
-            # ===========================================================
-            # 3.2.1 Model Selection & Training
-            # ===========================================================
-            if model_family == "Classical ML":
-                st.header("3. Classical ML — Model Selection & Training")
-            else:
-                st.header("3. Deep Learning — Model Selection & Training")
-                if problem_type == "Regression":
-                    st.info("Deep Learning is optimized for classification. Regression support is limited.")
-
-            model_name = None
-            model = None
-            param_grid = None
-            is_keras = False
-
-            # -----------------------------------------------------------
-            # 3.2.1 Classical ML Models (existing configuration, kept)
-            # -----------------------------------------------------------
-            if model_family == "Classical ML":
-                if problem_type == "Classification":
-                    model_name = st.selectbox(
-                        "Choose model",
-                        [
-                            "Logistic Regression", "SVM", "Random Forest", "KNN",
-                            "Decision Tree", "Naive Bayes", "Gradient Boosting",
-                            "AdaBoost", "Extra Trees"
-                        ]
-                    )
-                else:
-                    model_name = st.selectbox(
-                        "Choose model",
-                        [
-                            "Linear Regression", "Random Forest", "KNN",
-                            "Decision Tree", "SVR", "Gradient Boosting",
-                            "AdaBoost", "Extra Trees"
-                        ]
-                    )
-
-                tuning_mode = st.selectbox("Training mode", ["Manual", "Auto-tune hyperparameters"])
-                auto_tune = tuning_mode == "Auto-tune hyperparameters"
-
-                # Optional UI to set common hyperparameters per selected model
-                ui_params = {}
-                if tuning_mode == "Manual":
-                    with st.expander("Set hyperparameters for selected model (optional)"):
-                        if model_name in ["Random Forest", "Extra Trees"]:
-                            n_estimators_ui = st.slider("n_estimators", 10, 500, 100)
-                            max_depth_opt = st.selectbox("max_depth", ["None", 3, 5, 10, 20], index=0)
-                            max_depth_ui = None if max_depth_opt == "None" else int(max_depth_opt)
-                            min_samples_split_ui = st.number_input("min_samples_split", 2, 100, 2)
-                            ui_params = {
-                                "n_estimators": n_estimators_ui,
-                                "max_depth": max_depth_ui,
-                                "min_samples_split": int(min_samples_split_ui),
-                            }
-                        elif model_name == "KNN":
-                            n_neighbors_ui = st.slider("n_neighbors", 1, 50, 5)
-                            weights_ui = st.selectbox("weights", ["uniform", "distance"])
-                            metric_ui = st.selectbox("metric", ["minkowski", "euclidean", "manhattan"])
-                            ui_params = {"n_neighbors": n_neighbors_ui, "weights": weights_ui, "metric": metric_ui}
-                        elif model_name == "Decision Tree":
-                            criterion_ui = st.selectbox("criterion", ["gini", "entropy", "log_loss"], index=0)
-                            max_depth_dt_opt = st.selectbox("max_depth", ["None", 3, 5, 10, 20], index=0)
-                            max_depth_dt = None if max_depth_dt_opt == "None" else int(max_depth_dt_opt)
-                            min_samples_leaf_ui = st.number_input("min_samples_leaf", 1, 100, 1)
-                            ui_params = {"criterion": criterion_ui, "max_depth": max_depth_dt, "min_samples_leaf": int(min_samples_leaf_ui)}
-                        elif model_name == "SVR" or model_name == "SVM":
-                            C_ui = st.number_input("C", 0.01, 100.0, 1.0)
-                            kernel_ui = st.selectbox("kernel", ["rbf", "linear", "poly"])
-                            epsilon_ui = st.number_input("epsilon", 0.0, 1.0, 0.1)
-                            ui_params = {"C": C_ui, "kernel": kernel_ui, "epsilon": epsilon_ui}
-                        elif model_name == "Gradient Boosting":
-                            learning_rate_ui = st.number_input("learning_rate", 0.001, 1.0, 0.1)
-                            n_estimators_gb = st.slider("n_estimators", 10, 500, 100)
-                            subsample_ui = st.slider("subsample", 0.1, 1.0, 1.0)
-                            ui_params = {"learning_rate": learning_rate_ui, "n_estimators": n_estimators_gb, "subsample": subsample_ui}
-                        elif model_name == "AdaBoost":
-                            estimator_choice = st.selectbox("estimator", ["Default", "Decision Tree"], index=0)
-                            n_estimators_ab = st.slider("n_estimators", 10, 500, 50)
-                            learning_rate_ab = st.number_input("learning_rate", 0.01, 1.0, 1.0)
-                            ui_params = {"estimator": estimator_choice, "n_estimators": n_estimators_ab, "learning_rate": learning_rate_ab}
-
-                    manual_params_str = st.text_input(
-                        "Manual hyperparameters",
-                        value="",
-                        help="Enter comma-separated hyperparameters like C=1.0, max_depth=5. Leave blank to use default/manual widget values."
-                    )
-                    manual_params = parse_hyperparams(manual_params_str)
-                else:
-                    manual_params = {}
-
-                if model_name == "Logistic Regression":
-                    if auto_tune:
-                        model = LogisticRegression(max_iter=1000)
-                        param_grid = {"C": [0.01, 0.1, 1, 10]}
-                    else:
-                        if manual_params:
-                            model = LogisticRegression(max_iter=1000, **manual_params)
-                        else:
-                            C = st.number_input("C (regularization strength)", 0.01, 10.0, 1.0)
-                            model = LogisticRegression(max_iter=1000, C=C)
-                elif model_name == "SVM":
-                    if auto_tune:
-                        model = SVC(probability=True) if problem_type == "Classification" else SVR()
-                        param_grid = {"C": [0.1, 1, 10], "kernel": ["rbf", "linear"]}
-                    else:
-                        if manual_params:
-                            manual_params.setdefault("probability", True)
-                            model = SVC(**manual_params) if problem_type == "Classification" else SVR(**{k: v for k, v in manual_params.items() if k != "probability"})
-                        else:
-                            C = st.number_input("C (regularization strength)", 0.01, 10.0, 1.0)
-                            if problem_type == "Classification":
-                                model = SVC(C=C, probability=True)
-                            else:
-                                model = SVR(C=C)
-                elif model_name == "Random Forest":
-                    if auto_tune:
-                        model = RandomForestClassifier(random_state=42) if problem_type == "Classification" else RandomForestRegressor(random_state=42)
-                        param_grid = {"n_estimators": [50, 100, 200], "max_depth": [None, 5, 10]}
-                    else:
-                        if manual_params:
-                            model = RandomForestClassifier(random_state=42, **manual_params) if problem_type == "Classification" else RandomForestRegressor(random_state=42, **manual_params)
-                        else:
-                            if ui_params:
-                                rf_params = {k: v for k, v in ui_params.items() if v is not None}
-                                model = RandomForestClassifier(random_state=42, **rf_params) if problem_type == "Classification" else RandomForestRegressor(random_state=42, **rf_params)
-                            else:
-                                n_estimators = st.slider("n_estimators", 10, 300, 100)
-                                model = RandomForestClassifier(n_estimators=n_estimators, random_state=42) if problem_type == "Classification" else RandomForestRegressor(n_estimators=n_estimators, random_state=42)
-                elif model_name == "KNN":
-                    if auto_tune:
-                        model = KNeighborsClassifier() if problem_type == "Classification" else KNeighborsRegressor()
-                        param_grid = {"n_neighbors": [3, 5, 7], "weights": ["uniform", "distance"]}
-                    else:
-                        if manual_params:
-                            model = KNeighborsClassifier(**manual_params) if problem_type == "Classification" else KNeighborsRegressor(**manual_params)
-                        else:
-                            if ui_params:
-                                knn_params = ui_params.copy()
-                                model = KNeighborsClassifier(**knn_params) if problem_type == "Classification" else KNeighborsRegressor(**knn_params)
-                            else:
-                                n_neighbors = st.slider("n_neighbors", 1, 30, 5)
-                                model = KNeighborsClassifier(n_neighbors=n_neighbors) if problem_type == "Classification" else KNeighborsRegressor(n_neighbors=n_neighbors)
-                elif model_name == "Decision Tree":
-                    if auto_tune:
-                        model = DecisionTreeClassifier(random_state=42) if problem_type == "Classification" else DecisionTreeRegressor(random_state=42)
-                        param_grid = {"max_depth": [None, 3, 5, 10], "min_samples_split": [2, 5, 10]}
-                    else:
-                        if manual_params:
-                            model = DecisionTreeClassifier(random_state=42, **manual_params) if problem_type == "Classification" else DecisionTreeRegressor(random_state=42, **manual_params)
-                        else:
-                            if ui_params:
-                                dt_params = {k: v for k, v in ui_params.items() if v is not None}
-                                model = DecisionTreeClassifier(random_state=42, **dt_params) if problem_type == "Classification" else DecisionTreeRegressor(random_state=42, **dt_params)
-                            else:
-                                max_depth = st.slider("max_depth", 1, 20, 5)
-                                model = DecisionTreeClassifier(max_depth=max_depth, random_state=42) if problem_type == "Classification" else DecisionTreeRegressor(max_depth=max_depth, random_state=42)
-                elif model_name == "Naive Bayes":
-                    if manual_params:
-                        model = GaussianNB(**manual_params)
-                    else:
-                        model = GaussianNB()
-                elif model_name == "Gradient Boosting":
-                    if auto_tune:
-                        model = GradientBoostingClassifier(random_state=42) if problem_type == "Classification" else GradientBoostingRegressor(random_state=42)
-                        param_grid = {"n_estimators": [50, 100], "learning_rate": [0.01, 0.1]}
-                    else:
-                        if manual_params:
-                            model = GradientBoostingClassifier(random_state=42, **manual_params) if problem_type == "Classification" else GradientBoostingRegressor(random_state=42, **manual_params)
-                        else:
-                            if ui_params:
-                                gb_params = {k: v for k, v in ui_params.items() if v is not None}
-                                model = GradientBoostingClassifier(random_state=42, **gb_params) if problem_type == "Classification" else GradientBoostingRegressor(random_state=42, **gb_params)
-                            else:
-                                n_estimators = st.slider("n_estimators", 50, 300, 100)
-                                learning_rate = st.number_input("learning_rate", 0.01, 1.0, 0.1)
-                                model = GradientBoostingClassifier(n_estimators=n_estimators, learning_rate=learning_rate, random_state=42) if problem_type == "Classification" else GradientBoostingRegressor(n_estimators=n_estimators, learning_rate=learning_rate, random_state=42)
-                elif model_name == "AdaBoost":
-                    if auto_tune:
-                        model = AdaBoostClassifier(random_state=42) if problem_type == "Classification" else AdaBoostRegressor(random_state=42)
-                        param_grid = {"n_estimators": [50, 100, 200], "learning_rate": [0.01, 0.1, 1.0]}
-                    else:
-                        if manual_params:
-                            model = AdaBoostClassifier(random_state=42, **manual_params) if problem_type == "Classification" else AdaBoostRegressor(random_state=42, **manual_params)
-                        else:
-                            if ui_params:
-                                n_est = ui_params.get("n_estimators", 50)
-                                lr = ui_params.get("learning_rate", 0.1)
-                                est_choice = ui_params.get("estimator", "Default")
-                                base = None
-                                if est_choice == "Decision Tree":
-                                    base = DecisionTreeClassifier(random_state=42, max_depth=1) if problem_type == "Classification" else DecisionTreeRegressor(random_state=42, max_depth=1)
-                                if base is not None:
-                                    model = AdaBoostClassifier(n_estimators=n_est, learning_rate=lr, base_estimator=base, random_state=42) if problem_type == "Classification" else AdaBoostRegressor(n_estimators=n_est, learning_rate=lr, base_estimator=base, random_state=42)
-                                else:
-                                    model = AdaBoostClassifier(n_estimators=n_est, learning_rate=lr, random_state=42) if problem_type == "Classification" else AdaBoostRegressor(n_estimators=n_est, learning_rate=lr, random_state=42)
-                            else:
-                                n_estimators = st.slider("n_estimators", 50, 300, 100)
-                                learning_rate = st.number_input("learning_rate", 0.01, 1.0, 0.1)
-                                model = AdaBoostClassifier(n_estimators=n_estimators, learning_rate=learning_rate, random_state=42) if problem_type == "Classification" else AdaBoostRegressor(n_estimators=n_estimators, learning_rate=learning_rate, random_state=42)
-                elif model_name == "Extra Trees":
-                    if auto_tune:
-                        model = ExtraTreesClassifier(random_state=42) if problem_type == "Classification" else ExtraTreesRegressor(random_state=42)
-                        param_grid = {"n_estimators": [50, 100, 200], "max_depth": [None, 5, 10]}
-                    else:
-                        if manual_params:
-                            model = ExtraTreesClassifier(random_state=42, **manual_params) if problem_type == "Classification" else ExtraTreesRegressor(random_state=42, **manual_params)
-                        else:
-                            n_estimators = st.slider("n_estimators", 50, 300, 100)
-                            model = ExtraTreesClassifier(n_estimators=n_estimators, random_state=42) if problem_type == "Classification" else ExtraTreesRegressor(n_estimators=n_estimators, random_state=42)
-                else:
-                    if manual_params:
-                        model = LinearRegression(**manual_params)
-                    else:
-                        model = LinearRegression()
-
-            # -----------------------------------------------------------
-            # 3.2.1 Deep Learning Models: FNN / CNN (optional) / RNN / LSTM
-            # -----------------------------------------------------------
-            else:
-                if problem_type == "Classification":
-                    dl_options = ["FNN"]
-                    if TF_AVAILABLE:
-                        dl_options += ["CNN (optional)", "RNN", "LSTM"]
-                    else:
-                        st.info(
-                            "TensorFlow is not installed in this environment, so CNN, RNN and LSTM "
-                            "are unavailable — only FNN (scikit-learn MLP) can be trained. "
-                            "Install `tensorflow` to enable the other architectures."
-                        )
-                else:
-                    # Regression: FNN only (no CNN, RNN, LSTM)
-                    dl_options = ["FNN (MLP Regressor)"]
-                    st.caption("Deep Learning for Regression currently supports FNN architectures.")
-                    
-                model_name = st.selectbox("Choose deep learning model", dl_options)
-
-                with st.expander("Deep learning architecture settings (optional)"):
-                    n_hidden_layers = st.slider("Hidden layers", 1, 4, 2)
-                    hidden_units = st.slider("Units per hidden layer", 8, 256, 64)
-
-                is_keras = TF_AVAILABLE and model_name != "FNN" and model_name != "FNN (MLP Regressor)"
-
-                if not is_keras:
-                    # FNN via scikit-learn MLPClassifier / MLPRegressor — no external DL dependency required
-                    hidden_layer_sizes = tuple([hidden_units] * n_hidden_layers)
-                    if problem_type == "Classification":
-                        model = MLPClassifier(
-                            hidden_layer_sizes=hidden_layer_sizes,
-                            learning_rate_init=learning_rate_dl,
-                            batch_size=min(int(batch_size), 200),
-                            max_iter=int(epoch_limit),
-                            tol=max(loss_threshold, 1e-6),
-                            n_iter_no_change=max(int(early_stopping_patience), 1),
-                            early_stopping=X_val is not None,
-                            validation_fraction=0.1,
-                            random_state=42,
-                        )
-                    else:
-                        # Regression
-                        from sklearn.neural_network import MLPRegressor
-                        model = MLPRegressor(
-                            hidden_layer_sizes=hidden_layer_sizes,
-                            learning_rate_init=learning_rate_dl,
-                            batch_size=min(int(batch_size), 200),
-                            max_iter=int(epoch_limit),
-                            tol=max(loss_threshold, 1e-6),
-                            n_iter_no_change=max(int(early_stopping_patience), 1),
-                            early_stopping=X_val is not None,
-                            validation_fraction=0.1,
-                            random_state=42,
-                        )
-
-            # ===========================================================
-            # Train button
-            # ===========================================================
-            train_clicked = st.button("Train Model", type="primary")
-
-            if train_clicked and model is not None:
+# ---------------------------------------------------------------------------
+# 5. Model Comparison
+# ---------------------------------------------------------------------------
+with tabs[4]:
+    st.header("5. Model Comparison")
+    split = st.session_state.get(state_key("split"))
+    if split is None:
+        st.info("Create the train/test split in Step 3 first.")
+    else:
+        defaults = ["Logistic Regression", "Decision Tree", "Random Forest"] if split["problem_type"] == "Classification" else ["Linear Regression", "Decision Tree", "Random Forest"]
+        selected_models = st.multiselect(
+            "Models to compare",
+            model_names(split["problem_type"]),
+            default=defaults,
+            key=state_key("comparison_models"),
+        )
+        if st.button("Train and Compare Models", type="primary", key=state_key("compare_button")):
+            results, fitted = [], {}
+            progress = st.progress(0.0)
+            for index, model_name in enumerate(selected_models):
                 try:
-                    run_label = f"Model {len(st.session_state['training_runs']) + 1}: {model_name}"
+                    pipeline = build_model_pipeline(split, model_name)
+                    pipeline.fit(split["X_train"], split["y_train"])
+                    train_metrics, _ = score_model(split["problem_type"], pipeline, split["X_train"], split["y_train"])
+                    test_metrics, _ = score_model(split["problem_type"], pipeline, split["X_test"], split["y_test"])
+                    row = {"Model": model_name}
+                    row.update({f"Train {key}": value for key, value in train_metrics.items()})
+                    row.update({f"Test {key}": value for key, value in test_metrics.items()})
+                    results.append(row)
+                    fitted[model_name] = pipeline
+                except Exception as exc:
+                    results.append({"Model": model_name, "Error": str(exc)})
+                progress.progress((index + 1) / max(1, len(selected_models)))
+            st.session_state[state_key("comparison")] = {"table": pd.DataFrame(results), "models": fitted}
 
-                    # ---------------- Classical ML training ----------------
-                    if model_family == "Classical ML":
-                        if auto_tune and param_grid is not None:
-                            scoring = "accuracy" if problem_type == "Classification" else "r2"
-                            search = GridSearchCV(
-                                model, param_grid, cv=3, scoring=scoring, n_jobs=-1
-                            )
-                            search.fit(X_train, y_train)
-                            model = search.best_estimator_
-                            st.write("**Best hyperparameters:**", search.best_params_)
-                            st.write(f"**Best CV {scoring}:** {search.best_score_:.3f}")
-                        else:
-                            model.fit(X_train, y_train)
+        comparison = st.session_state.get(state_key("comparison"))
+        if comparison:
+            table = comparison["table"]
+            st.dataframe(table, use_container_width=True)
+            primary = "Test Accuracy" if split["problem_type"] == "Classification" else "Test MAE"
+            if primary in table.columns:
+                plot_data = table.dropna(subset=[primary])
+                fig, ax = plt.subplots(figsize=(8, 4))
+                sns.barplot(data=plot_data, x="Model", y=primary, ax=ax, color="#B31B1B")
+                ax.tick_params(axis="x", rotation=30)
+                ax.set_title(f"Model Comparison - {primary}")
+                st.pyplot(fig)
+            st.download_button(
+                "Download Model Comparison CSV",
+                table.to_csv(index=False).encode("utf-8"),
+                file_name="icaav_model_comparison.csv",
+                mime="text/csv",
+            )
 
-                        # 3.2.2 Cross-validation settings
-                        if use_cv:
-                            scoring = "accuracy" if problem_type == "Classification" else "r2"
-                            cv_splitter = (
-                                StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=42)
-                                if problem_type == "Classification"
-                                else KFold(n_splits=cv_folds, shuffle=True, random_state=42)
-                            )
-                            cv_scores = cross_val_score(model, X_train, y_train, cv=cv_splitter, scoring=scoring)
-                            st.write(
-                                f"**{cv_folds}-fold CV {scoring}:** "
-                                f"{cv_scores.mean():.3f} ± {cv_scores.std():.3f}"
-                            )
 
-                        y_pred = model.predict(X_test)
+# ---------------------------------------------------------------------------
+# 6. Validation & Tuning
+# ---------------------------------------------------------------------------
+with tabs[5]:
+    st.header("6. Cross-Validation and Hyperparameter Tuning")
+    split = st.session_state.get(state_key("split"))
+    if split is None:
+        st.info("Create the train/test split in Step 3 first.")
+    else:
+        validation_name = st.selectbox("Model to validate", model_names(split["problem_type"]), key=state_key("validation_model"))
+        folds = st.slider("Cross-validation folds", 2, 10, 5, key=state_key("folds"))
+        if st.button("Run Cross-Validation", key=state_key("cv_button")):
+            try:
+                pipeline = build_model_pipeline(split, validation_name)
+                scoring = ["accuracy", "precision_weighted", "recall_weighted", "f1_weighted"] if split["problem_type"] == "Classification" else ["r2", "neg_mean_absolute_error", "neg_root_mean_squared_error"]
+                results = cross_validate(pipeline, split["X_train"], split["y_train"], cv=folds, scoring=scoring, n_jobs=-1)
+                summary = []
+                for key, values in results.items():
+                    if not key.startswith("test_"):
+                        continue
+                    display_values = -values if key in {"test_neg_mean_absolute_error", "test_neg_root_mean_squared_error"} else values
+                    summary.append({"Metric": key.replace("test_", "").replace("neg_", ""), "Mean": np.mean(display_values), "Std": np.std(display_values)})
+                st.session_state[state_key("cv_results")] = pd.DataFrame(summary)
+            except Exception as exc:
+                st.error(f"Cross-validation failed: {exc}")
 
-                    # ---------------- Deep learning training ----------------
-                    else:
-                        if is_keras:
-                            le = LabelEncoder()
-                            y_train_enc = le.fit_transform(y_train)
-                            y_test_enc = le.transform(y_test)
-                            classes_sorted = le.classes_
-                            num_classes = len(classes_sorted)
+        cv_results = st.session_state.get(state_key("cv_results"))
+        if cv_results is not None:
+            st.dataframe(cv_results, use_container_width=True)
 
-                            if X_val is not None:
-                                y_val_enc = le.transform(y_val)
-
-                            if num_classes == 2:
-                                y_train_fit = y_train_enc
-                                y_val_fit = y_val_enc if X_val is not None else None
-                            else:
-                                y_train_fit = to_categorical(y_train_enc, num_classes=num_classes)
-                                y_val_fit = to_categorical(y_val_enc, num_classes=num_classes) if X_val is not None else None
-
-                            keras_model, loss_fn = build_keras_model(
-                                model_name, X_train.shape[1], num_classes, learning_rate_dl
-                            )
-
-                            progress_bar = st.progress(0)
-                            status_text = st.empty()
-                            callbacks = [StProgressCallback(int(epoch_limit), progress_bar, status_text),
-                                         TimeoutCallback(timeout_threshold if timeout_threshold > 0 else None)]
-                            if loss_threshold > 0:
-                                callbacks.append(LossThresholdCallback(loss_threshold))
-
-                            validation_data = (X_val.values, y_val_fit) if X_val is not None else None
-
-                            history = keras_model.fit(
-                                X_train.values, y_train_fit,
-                                validation_data=validation_data,
-                                epochs=int(epoch_limit),
-                                batch_size=int(batch_size),
-                                callbacks=callbacks,
-                                verbose=0,
-                            )
-                            status_text.text("Training complete.")
-
-                            # 3.2.3 Loss / accuracy curves
-                            st.subheader("Training Progress")
-                            fig_hist, ax_hist = plt.subplots(1, 2, figsize=(11, 4))
-                            ax_hist[0].plot(history.history["loss"], label="Train loss")
-                            if "val_loss" in history.history:
-                                ax_hist[0].plot(history.history["val_loss"], label="Val loss")
-                            ax_hist[0].set_xlabel("Epoch")
-                            ax_hist[0].set_ylabel("Loss")
-                            ax_hist[0].set_title("Loss Curve")
-                            ax_hist[0].legend()
-
-                            ax_hist[1].plot(history.history["accuracy"], label="Train accuracy")
-                            if "val_accuracy" in history.history:
-                                ax_hist[1].plot(history.history["val_accuracy"], label="Val accuracy")
-                            ax_hist[1].set_xlabel("Epoch")
-                            ax_hist[1].set_ylabel("Accuracy")
-                            ax_hist[1].set_title("Accuracy Curve")
-                            ax_hist[1].legend()
-                            fig_hist.tight_layout()
-                            st.pyplot(fig_hist)
-
-                            model = keras_model  # unify downstream variable name
-                            if num_classes == 2:
-                                y_score_full = model.predict(X_test.values, verbose=0)
-                                y_score = np.hstack([1 - y_score_full, y_score_full])
-                                y_pred_enc = (y_score_full.ravel() > 0.5).astype(int)
-                            else:
-                                y_score = model.predict(X_test.values, verbose=0)
-                                y_pred_enc = np.argmax(y_score, axis=1)
-                            y_pred = le.inverse_transform(y_pred_enc)
-
-                        else:
-                            # FNN via MLPClassifier
-                            model.fit(X_train, y_train)
-                            y_pred = model.predict(X_test)
-
-                            st.subheader("Training Progress")
-                            if hasattr(model, "loss_curve_"):
-                                fig_hist, ax_hist = plt.subplots(figsize=(6, 4))
-                                ax_hist.plot(model.loss_curve_, label="Training loss")
-                                if hasattr(model, "validation_scores_") and model.validation_scores_:
-                                    ax_hist.plot(
-                                        np.array(model.validation_scores_) * max(model.loss_curve_),
-                                        label="Validation score (scaled)", linestyle="--"
-                                    )
-                                ax_hist.set_xlabel("Iteration")
-                                ax_hist.set_ylabel("Loss")
-                                ax_hist.set_title("Loss Curve")
-                                ax_hist.legend()
-                                st.pyplot(fig_hist)
-
-                    st.success(f"{run_label} trained!")
-
-                    # =======================================================
-                    # 3.2.4 Evaluation Metrics
-                    # =======================================================
-                    if problem_type == "Classification":
-                        classes_all = sorted(pd.unique(pd.concat([pd.Series(y_test), pd.Series(y_pred)])))
-
-                        acc = accuracy_score(y_test, y_pred)
-                        prec = precision_score(y_test, y_pred, average="weighted", zero_division=0)
-                        rec = recall_score(y_test, y_pred, average="weighted", zero_division=0)
-                        f1 = f1_score(y_test, y_pred, average="weighted", zero_division=0)
-                        cm = confusion_matrix(y_test, y_pred, labels=classes_all)
-                        rates = confusion_derived_rates(cm)
-
-                        # Probability scores for AUC / ROC / PR
-                        y_score_for_auc = None
-                        if is_keras:
-                            if len(classes_all) == 2 and y_score.shape[1] == 2:
-                                y_score_for_auc = y_score
-                            else:
-                                y_score_for_auc = y_score
-                        elif hasattr(model, "predict_proba"):
-                            try:
-                                y_score_for_auc = model.predict_proba(X_test)
-                            except Exception:
-                                y_score_for_auc = None
-
-                        auc_value = None
-                        if y_score_for_auc is not None:
-                            try:
-                                if len(classes_all) == 2:
-                                    auc_value = roc_auc_score(y_test, y_score_for_auc[:, 1])
-                                else:
-                                    auc_value = roc_auc_score(
-                                        y_test, y_score_for_auc, multi_class="ovr", average="macro",
-                                        labels=classes_all
-                                    )
-                            except Exception:
-                                auc_value = None
-
-                        st.subheader("Final Model Performance on the Testing Set")
-                        st.info(
-                            f"These results were calculated using the held-out testing set "
-                            f"({len(X_test)} samples). The testing set was not used to train the model."
-                        )
-                        m1, m2, m3, m4 = st.columns(4)
-                        m1.metric("Test Accuracy", f"{acc:.3f}")
-                        m2.metric("Test Precision (weighted)", f"{prec:.3f}")
-                        m3.metric("Test Recall (weighted)", f"{rec:.3f}")
-                        m4.metric("Test F1 Score (weighted)", f"{f1:.3f}")
-
-                        m5, m6, m7, m8 = st.columns(4)
-                        m5.metric("TPR (macro)", f"{rates['TPR']:.3f}")
-                        m6.metric("FPR (macro)", f"{rates['FPR']:.3f}")
-                        m7.metric("FNR (macro)", f"{rates['FNR']:.3f}")
-                        m8.metric("TNR (macro)", f"{rates['TNR']:.3f}")
-
-                        if auc_value is not None:
-                            st.metric("AUC", f"{auc_value:.3f}")
-                        else:
-                            st.info("AUC unavailable for this model/configuration (no probability scores).")
-
-                        # Confusion matrix
-                        st.subheader("Confusion Matrix")
-                        fig_cm, ax_cm = plt.subplots()
-                        sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", ax=ax_cm,
-                                    xticklabels=classes_all, yticklabels=classes_all)
-                        ax_cm.set_xlabel("Predicted")
-                        ax_cm.set_ylabel("True")
-                        st.pyplot(fig_cm)
-
-                        # ROC curve + PR curve (3.2.4 Visual Outputs)
-                        if y_score_for_auc is not None:
-                            roc_col, pr_col = st.columns(2)
-                            with roc_col:
-                                fig_roc, auc_scores = plot_roc_curve(np.array(y_test), y_score_for_auc, classes_all)
-                                st.pyplot(fig_roc)
-                            with pr_col:
-                                fig_pr = plot_pr_curve(np.array(y_test), y_score_for_auc, classes_all)
-                                st.pyplot(fig_pr)
-
-                        # Prediction visualization plots
-                        st.subheader("Prediction Visualization")
-                        fig_pred = plot_prediction_visualization(y_test, y_pred, classes_all)
-                        st.pyplot(fig_pred)
-
-                        metrics_record = {
-                            "Run": run_label, "Model": model_name, "Family": model_family,
-                            "Accuracy": round(acc, 3), "Precision": round(prec, 3),
-                            "Recall": round(rec, 3), "F1": round(f1, 3),
-                            "TPR": round(rates["TPR"], 3), "FPR": round(rates["FPR"], 3),
-                            "FNR": round(rates["FNR"], 3), "TNR": round(rates["TNR"], 3),
-                            "AUC": round(auc_value, 3) if auc_value is not None else None,
-                        }
-
-                    else:
-                        mse = mean_squared_error(y_test, y_pred)
-                        mae = mean_absolute_error(y_test, y_pred)
-                        r2 = r2_score(y_test, y_pred)
-
-                        st.subheader("Final Model Performance on the Testing Set")
-                        st.info(
-                            f"These results were calculated using the held-out testing set "
-                            f"({len(X_test)} samples). The testing set was not used to train the model."
-                        )
-                        m1, m2, m3 = st.columns(3)
-                        m1.metric("Test MSE", f"{mse:.3f}")
-                        m2.metric("Test MAE", f"{mae:.3f}")
-                        m3.metric("Test R² Score", f"{r2:.3f}")
-
-                        st.subheader("Predicted vs Actual")
-                        fig, ax = plt.subplots()
-                        ax.scatter(y_test, y_pred, alpha=0.7)
-                        ax.plot([y_test.min(), y_test.max()], [y_test.min(), y_test.max()], "r--")
-                        ax.set_xlabel("Actual")
-                        ax.set_ylabel("Predicted")
-                        st.pyplot(fig)
-
-                        metrics_record = {
-                            "Run": run_label, "Model": model_name, "Family": model_family,
-                            "MSE": round(mse, 3), "MAE": round(mae, 3), "R2": round(r2, 3),
-                        }
-
-                    # -------------------------------------------------
-                    # 3.2.3 Track model performance across multiple runs
-                    # -------------------------------------------------
-                    st.session_state["training_runs"].append(metrics_record)
-                    st.session_state["trained_models"][run_label] = {
-                        "model": model,
-                        "is_keras": is_keras,
-                        "problem_type": problem_type,
-                        "feature_cols": feature_cols,
-                        "target_col": target_col,
-                        "classes": classes_all if problem_type == "Classification" else None,
-                        "label_encoder": le if is_keras else None,
+        st.subheader("Grid-Search Tuning")
+        grid = default_grid(split["problem_type"], validation_name)
+        if not grid:
+            st.info("This model has no predefined grid. Use its manual controls in Step 4.")
+        else:
+            st.json(grid)
+            if st.button("Tune Selected Model", type="primary", key=state_key("tune_button")):
+                try:
+                    pipeline = build_model_pipeline(split, validation_name)
+                    scoring = "accuracy" if split["problem_type"] == "Classification" else "r2"
+                    search = GridSearchCV(pipeline, grid, cv=folds, scoring=scoring, n_jobs=-1)
+                    search.fit(split["X_train"], split["y_train"])
+                    test_metrics, test_prediction = score_model(split["problem_type"], search.best_estimator_, split["X_test"], split["y_test"])
+                    bundle = {
+                        "model": search.best_estimator_, "model_name": validation_name,
+                        "problem_type": split["problem_type"], "target": split["target"],
+                        "feature_cols": split["features"], "test_metrics": test_metrics,
+                        "test_prediction": test_prediction, "split": split,
+                        "best_params": search.best_params_,
+                        "feature_examples": st.session_state[state_key("df")][split["features"]].copy(),
                     }
-                    st.session_state["active_run"] = run_label
+                    st.session_state[state_key("tuned_bundle")] = bundle
+                except Exception as exc:
+                    st.error(f"Grid search failed: {exc}")
 
-                except ValueError as e:
-                    if problem_type == "Classification":
-                        st.error("Please select appropriate target variable.")
-                    else:
-                        st.error("Training failed because the model could not process the selected data.")
-                    st.write("Detailed error:", e)
+        tuned = st.session_state.get(state_key("tuned_bundle"))
+        if tuned:
+            st.write("**Best parameters:**", tuned["best_params"])
+            render_evaluation(tuned)
 
-            # ===========================================================
-            # 3.2.3 Multi-model comparison table
-            # ===========================================================
-            if st.session_state["training_runs"]:
-                st.header("4. Model Comparison")
-                st.dataframe(pd.DataFrame(st.session_state["training_runs"]), use_container_width=True)
-                if st.button("Clear run history"):
-                    st.session_state["training_runs"] = []
-                    st.session_state["trained_models"] = {}
-                    st.session_state["active_run"] = None
-                    st.rerun()
 
-            # ===========================================================
-            # 3.2.5 Model Import / Export
-            # ===========================================================
-            st.header("5. Model Import / Export")
+# ---------------------------------------------------------------------------
+# 7. Save, Load & Predict
+# ---------------------------------------------------------------------------
+with tabs[6]:
+    st.header("7. Save, Load, and Make a Live Prediction")
+    trained = st.session_state.get(state_key("trained_bundle"))
+    tuned = st.session_state.get(state_key("tuned_bundle"))
+    comparison = st.session_state.get(state_key("comparison"))
 
-            exp_col, imp_col = st.columns(2)
+    available = {}
+    if trained:
+        available[f"Trained - {trained['model_name']}"] = trained
+    if tuned:
+        available[f"Tuned - {tuned['model_name']}"] = tuned
+    if comparison:
+        split = st.session_state.get(state_key("split"))
+        source_df = st.session_state.get(state_key("df"))
+        for name, model in comparison["models"].items():
+            available[f"Compared - {name}"] = {
+                "model": model, "model_name": name, "problem_type": split["problem_type"],
+                "target": split["target"], "feature_cols": split["features"],
+                "feature_examples": source_df[split["features"]].copy(),
+            }
 
-            with exp_col:
-                st.subheader("Save a trained model")
-                if st.session_state["trained_models"]:
-                    export_choice = st.selectbox(
-                        "Select a trained run to export",
-                        list(st.session_state["trained_models"].keys())
-                    )
-                    if st.button("Export selected model"):
-                        entry = st.session_state["trained_models"][export_choice]
-                        os.makedirs("models", exist_ok=True)
-                        safe_name = export_choice.replace(" ", "_").replace(":", "")
-                        if entry["is_keras"]:
-                            file_path = os.path.join("models", f"{safe_name}.keras")
-                            entry["model"].save(file_path)
-                        else:
-                            file_path = os.path.join("models", f"{safe_name}.pkl")
-                            joblib.dump(entry["model"], file_path)
-                        st.success(f"Saved model to {file_path}")
-                        with open(file_path, "rb") as f:
-                            file_bytes = f.read()
-                        st.download_button(
-                            "Download model",
-                            data=file_bytes,
-                            file_name=os.path.basename(file_path),
-                            mime="application/octet-stream"
-                        )
+    st.subheader("Save a Complete Model Bundle")
+    if available:
+        save_choice = st.selectbox("Model to save", list(available), key=state_key("save_choice"))
+        st.download_button(
+            "Download ICAAV Supervised Model (.pkl)",
+            data=bundle_bytes(available[save_choice]),
+            file_name="icaav_supervised_model_bundle.pkl",
+            mime="application/octet-stream",
+        )
+    else:
+        st.info("Train, tune, or compare a model before saving.")
+
+    st.subheader("Load a Saved Model Bundle")
+    st.warning("Only load pickle/Joblib files from a trusted source.")
+    model_file = st.file_uploader("Upload a saved ICAAV model bundle", type=["pkl", "joblib"], key=state_key("model_upload"))
+    if model_file is not None and st.button("Load Model Bundle", key=state_key("load_button")):
+        try:
+            loaded = joblib.load(BytesIO(model_file.read()))
+            required = {"model", "model_name", "problem_type", "feature_cols", "feature_examples"}
+            if not isinstance(loaded, dict) or not required.issubset(loaded):
+                raise ValueError("The file is not a compatible ICAAV model bundle.")
+            st.session_state[state_key("loaded_bundle")] = loaded
+            st.success(f"Loaded {loaded['model_name']} successfully.")
+        except Exception as exc:
+            st.error(f"Could not load the model bundle: {exc}")
+
+    loaded = st.session_state.get(state_key("loaded_bundle"))
+    if loaded:
+        available[f"Uploaded - {loaded['model_name']}"] = loaded
+
+    st.subheader("Live Prediction")
+    if not available:
+        st.info("A trained or loaded model is required for prediction.")
+    else:
+        predict_choice = st.radio("Predict using", list(available), horizontal=True, key=state_key("predict_choice"))
+        active = available[predict_choice]
+        examples = active["feature_examples"]
+        values = {}
+        with st.form("icaav_supervised_prediction_form"):
+            for feature in active["feature_cols"]:
+                series = examples[feature]
+                if pd.api.types.is_numeric_dtype(series):
+                    default = float(series.dropna().median()) if not series.dropna().empty else 0.0
+                    values[feature] = st.number_input(feature, value=default)
                 else:
-                    st.info("Train a model first to enable export.")
+                    choices = series.dropna().astype(str).unique().tolist()
+                    if not choices:
+                        choices = [""]
+                    values[feature] = st.selectbox(feature, choices)
+            submitted = st.form_submit_button("Make Prediction", type="primary")
 
-            with imp_col:
-                st.subheader("Load a pretrained model")
-                pretrained_file = st.file_uploader(
-                    "Upload a model file (.pkl / .joblib for classical ML, .keras / .h5 for deep learning)",
-                    type=["pkl", "joblib", "keras", "h5"],
-                    key="pretrained_uploader"
-                )
-                if pretrained_file is not None:
-                    suffix = pretrained_file.name.split(".")[-1].lower()
-                    tmp_path = os.path.join("models", f"uploaded_pretrained.{suffix}")
-                    os.makedirs("models", exist_ok=True)
-                    with open(tmp_path, "wb") as f:
-                        f.write(pretrained_file.getbuffer())
-                    try:
-                        if suffix in ["keras", "h5"]:
-                            if not TF_AVAILABLE:
-                                st.error("TensorFlow is required to load Keras models but is not installed.")
-                            else:
-                                loaded_model = keras_load_model(tmp_path)
-                                st.session_state["loaded_pretrained"] = {
-                                    "model": loaded_model, "is_keras": True
-                                }
-                                st.success(f"Loaded Keras model: {pretrained_file.name}")
-                        else:
-                            loaded_model = joblib.load(tmp_path)
-                            st.session_state["loaded_pretrained"] = {
-                                "model": loaded_model, "is_keras": False
-                            }
-                            st.success(f"Loaded model: {pretrained_file.name}")
-                    except Exception as e:
-                        st.error(f"Could not load model: {e}")
+        if submitted:
+            try:
+                row = pd.DataFrame([values], columns=active["feature_cols"])
+                prediction = active["model"].predict(row)[0]
+                result = {"Prediction": prediction}
+                if active["problem_type"] == "Classification" and hasattr(active["model"], "predict_proba"):
+                    probabilities = active["model"].predict_proba(row)[0]
+                    classes = active["model"].classes_
+                    result["Probabilities"] = {str(label): float(probability) for label, probability in zip(classes, probabilities)}
+                st.session_state[state_key("prediction")] = result
+            except Exception as exc:
+                st.error(f"Prediction failed: {exc}")
 
-            # ===========================================================
-            # 3.2.6 Testing on New Data
-            # ===========================================================
-            st.header("6. Testing on New Data")
+        result = st.session_state.get(state_key("prediction"))
+        if result:
+            st.success(f"Model prediction: **{result['Prediction']}**")
+            if "Probabilities" in result:
+                st.dataframe(pd.DataFrame.from_dict(result["Probabilities"], orient="index", columns=["Probability"]), use_container_width=True)
 
-            model_source_options = []
-            if st.session_state["trained_models"]:
-                model_source_options += [f"Session run: {k}" for k in st.session_state["trained_models"].keys()]
-            if st.session_state["loaded_pretrained"] is not None:
-                model_source_options.append("Loaded pretrained model")
-
-            if not model_source_options:
-                st.info("Train a model or load a pretrained model above to test it on new data.")
-            else:
-                test_model_choice = st.selectbox("Choose model to use for inference", model_source_options)
-                external_file = st.file_uploader(
-                    "Upload external test dataset (CSV)", type=["csv"], key="external_test_uploader"
-                )
-
-                if external_file is not None:
-                    ext_df = pd.read_csv(external_file)
-                    st.dataframe(ext_df.head())
-
-                    if test_model_choice.startswith("Session run:"):
-                        run_key = test_model_choice.replace("Session run: ", "")
-                        entry = st.session_state["trained_models"][run_key]
-                        infer_model = entry["model"]
-                        infer_is_keras = entry["is_keras"]
-                        infer_features = entry["feature_cols"]
-                        infer_target = entry["target_col"]
-                        infer_le = entry["label_encoder"]
-                    else:
-                        entry = st.session_state["loaded_pretrained"]
-                        infer_model = entry["model"]
-                        infer_is_keras = entry["is_keras"]
-                        infer_features = [c for c in ext_df.columns if c != target_col]
-                        infer_target = target_col if target_col in ext_df.columns else None
-                        infer_le = None
-
-                    missing_cols = [c for c in infer_features if c not in ext_df.columns]
-                    if missing_cols:
-                        st.error(f"Uploaded dataset is missing required feature columns: {missing_cols}")
-                    else:
-                        X_new = ext_df[infer_features]
-                        if st.button("Run inference on uploaded data"):
-                            try:
-                                if infer_is_keras:
-                                    raw_pred = infer_model.predict(X_new.values, verbose=0)
-                                    if raw_pred.shape[1] == 1:
-                                        pred_enc = (raw_pred.ravel() > 0.5).astype(int)
-                                    else:
-                                        pred_enc = np.argmax(raw_pred, axis=1)
-                                    predictions = infer_le.inverse_transform(pred_enc) if infer_le is not None else pred_enc
-                                else:
-                                    predictions = infer_model.predict(X_new)
-
-                                result_df = ext_df.copy()
-                                result_df["Predicted"] = predictions
-
-                                st.subheader("Predictions")
-                                st.dataframe(result_df, use_container_width=True)
-
-                                # 3.2.6 Compare predicted labels with actual labels, if present
-                                if infer_target is not None and infer_target in ext_df.columns:
-                                    y_true_new = ext_df[infer_target]
-                                    acc_new = accuracy_score(y_true_new, predictions)
-                                    st.metric("Accuracy on uploaded data", f"{acc_new:.3f}")
-
-                                    cm_new = confusion_matrix(y_true_new, predictions)
-                                    fig_new, ax_new = plt.subplots()
-                                    sns.heatmap(cm_new, annot=True, fmt="d", cmap="Greens", ax=ax_new)
-                                    ax_new.set_xlabel("Predicted")
-                                    ax_new.set_ylabel("True")
-                                    st.pyplot(fig_new)
-                                else:
-                                    st.info("No matching target column found in the uploaded data — showing predictions only.")
-
-                                csv_bytes = result_df.to_csv(index=False).encode("utf-8")
-                                st.download_button(
-                                    "Download predictions (CSV)",
-                                    data=csv_bytes,
-                                    file_name="predictions.csv",
-                                    mime="text/csv"
-                                )
-                            except Exception as e:
-                                st.error(f"Inference failed: {e}")
-else:
-    st.info("Upload an engineered dataset to start training.")
+    st.caption("Educational analytical output only. Validate the model and data before operational use.")
