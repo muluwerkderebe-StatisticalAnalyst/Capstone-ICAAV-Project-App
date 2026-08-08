@@ -236,17 +236,22 @@ render_header(
 )
 st.title("Tab 3. Semi-Supervised and Unsupervised Learning")
 
-# Each container reserves one section's slot, so the five parts render in
-# this order with a divider between them.
-tab_load = st.container()
-st.divider()
-tab_quality = st.container()
-st.divider()
-tab_impute = st.container()
-st.divider()
-tab_ssl = st.container()
-st.divider()
-tab_cluster = st.container()
+# Keep every original task in its existing container and order, but present
+# the five tasks as compact horizontal tabs instead of one long page.
+tabs = st.tabs(
+    [
+        "1. Large Unlabeled Data",
+        "2. Data Quality Analysis",
+        "3. Data Imputation",
+        "4. Semi-Supervised ML & Evaluation",
+        "5. Unsupervised Learning",
+    ]
+)
+tab_load = tabs[0]
+tab_quality = tabs[1]
+tab_impute = tabs[2]
+tab_ssl = tabs[3]
+tab_cluster = tabs[4]
 
 
 # 3.3.1 Large Unlabeled Data Handling
