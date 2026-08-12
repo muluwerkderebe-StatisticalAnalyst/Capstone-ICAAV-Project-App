@@ -1,9 +1,8 @@
 """ICAAV automated supervised-machine-learning workflow.
 
-This page preserves the original classification/regression model choices,
+This page capables to do classification/regression model choices,
 manual and automatic hyperparameter controls, evaluation plots, and model
-download. It adds the complete pipeline stages demonstrated by the real-estate
-and loan-eligibility reference applications: exploration, imputation,
+download. It adds the complete pipeline stages for exploration, imputation,
 categorical encoding, scaling, reusable splitting, model comparison,
 cross-validation, model bundles, reload, and live prediction.
 """
