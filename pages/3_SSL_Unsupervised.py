@@ -106,6 +106,22 @@ def scale_features(values, scaler_name):
     return scaled.astype(np.float32)
 
 
+def elbow_silhouette_scan(X, k_min, k_max):
+    """Fit K-Means once per K in the range and record two ways of judging it:
+    WCSS (inertia, the elbow curve) and the silhouette score. Silhouette is
+    O(n^2), so it is measured on a capped sample."""
+    rows = []
+    for k in range(int(k_min), int(k_max) + 1):
+        km = KMeans(n_clusters=k, n_init=10, random_state=42).fit(X)
+        rows.append({
+            "K": k,
+            "WCSS": float(km.inertia_),
+            "Silhouette": float(silhouette_score(
+                X, km.labels_, sample_size=min(5000, len(X)), random_state=42)),
+        })
+    return pd.DataFrame(rows)
+
+
 def save_checkpoint(df):
     """Save the working data to disk, falling back to CSV when parquet
     (pyarrow) is unavailable."""
@@ -228,35 +244,36 @@ def reveal_button(key, name):
 apply_theme()
 
 render_header(
-    title="Tab 3. Semi-Supervised and Unsupervised Learning",
+    title="Tab 3 — Semi-Supervised and Unsupervised Learning",
     subtitle_html=(
         "SSL • Clustering • Data Quality Analysis"
         "<br>Advanced Biomechatronics and Locomotion Laboratory"
     ),
 )
-st.title("Semi-Supervised and Unsupervised Learning")
 
 # Keep every original task in its existing container and order, but present
-# the five tasks as compact horizontal tabs instead of one long page.
+# the six tasks as compact horizontal tabs instead of one long page.
 tabs = st.tabs(
     [
         "1. Large Unlabeled Data",
         "2. Data Quality Analysis",
         "3. Data Imputation",
-        "4. Semi-Supervised ML & Evaluation",
-        "5. Unsupervised Learning",
+        "4. Semi-Supervised ML",
+        "5. SSL Evaluation",
+        "6. Unsupervised Learning",
     ]
 )
 tab_load = tabs[0]
 tab_quality = tabs[1]
 tab_impute = tabs[2]
 tab_ssl = tabs[3]
-tab_cluster = tabs[4]
+tab_eval = tabs[4]
+tab_cluster = tabs[5]
 
 
-# 3.3.1 Large Unlabeled Data Handling
+# 1. Large Unlabeled Data
 with tab_load:
-
+    st.header("1. Large Unlabeled Data")
 
     # Chunked reading buffers one slice of the file at a time instead of
     # pulling the whole file into RAM at once.
@@ -325,9 +342,9 @@ with tab_load:
         st.info("Upload an unlabeled dataset to begin.")
 
 
-# 3.3.2 Data Quality Analysis
+# 2. Data Quality Analysis
 with tab_quality:
-
+    st.header("2. Data Quality Analysis")
 
     if "ssl_raw" not in st.session_state:
         st.info("Load a dataset above to analyze its quality.")
@@ -385,9 +402,9 @@ with tab_quality:
                 st.pyplot(fig)
 
 
-# 3.3.3 Data Imputation
+# 3. Data Imputation
 with tab_impute:
-  
+    st.header("3. Data Imputation")
 
     if "ssl_raw" not in st.session_state:
         st.info("Load a dataset above before imputing.")
@@ -440,9 +457,9 @@ with tab_impute:
                 file_name="imputed_unlabeled_data.csv", mime="text/csv")
 
 
-# 3.3.4 / 3.3.5 Semi-Supervised Learning and Evaluation
+# 4. Semi-Supervised ML
 with tab_ssl:
-   
+    st.header("4. Semi-Supervised ML")
 
     if "ssl_clean" not in st.session_state:
         st.info("Impute the unlabeled data above before running SSL.")
@@ -595,77 +612,144 @@ with tab_ssl:
                                 progress=progress,
                                 max_per_round=int(max_per_round))
                         st.session_state["ssl_result"] = result
+                        st.success("Training complete. See Tab 5 for the "
+                                   "evaluation results.")
                     except Exception as e:
                         show_library_error("Semi supervised training", e)
 
-        # 3.3.5 results are rendered from session_state so they survive reruns.
-        if "ssl_result" in st.session_state:
-            res = st.session_state["ssl_result"]
-            history = res["history"]
+
+# 5. SSL Evaluation
+with tab_eval:
+    st.header("5. SSL Evaluation")
+
+    # Results are rendered from session_state so they survive reruns and stay
+    # visible while the training controls live in the previous tab.
+    if "ssl_result" not in st.session_state:
+        st.info("Run semi-supervised training in Tab 4 before evaluating.")
+    else:
+        res = st.session_state["ssl_result"]
+        history = res["history"]
+
+        st.subheader("Training Progress")
+        final_pct = history["pct_labeled"].iloc[-1]
+        st.metric("Unlabeled data auto labeled", f"{final_pct:.1f}%")
+
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11, 4))
+        ax1.plot(history["round"], history["accuracy"], marker="o", color="#B31B1B")
+        ax1.set_xlabel("Round")
+        ax1.set_ylabel("Accuracy on held out set")
+        ax1.set_title("Accuracy across rounds")
+        ax2.plot(history["round"], history["pct_labeled"], marker="s", color="#1B5EB3")
+        ax2.set_xlabel("Round")
+        ax2.set_ylabel("Percent of data labeled")
+        ax2.set_title("Auto labeling progress")
+        fig.tight_layout()
+        st.pyplot(fig)
+
+        # Standard metrics, all measured on the held out labeled set.
+        st.subheader("Evaluation Metrics")
+        y_true, y_pred = res["hold_y"], res["final_pred"]
+        st.write(f"**Accuracy:** {accuracy_score(y_true, y_pred):.3f}")
+        st.write(
+            f"**Precision (weighted):** "
+            f"{precision_score(y_true, y_pred, average='weighted', zero_division=0):.3f}")
+        st.write(
+            f"**Recall (weighted):** "
+            f"{recall_score(y_true, y_pred, average='weighted', zero_division=0):.3f}")
+        st.write(
+            f"**F1 Score (weighted):** "
+            f"{f1_score(y_true, y_pred, average='weighted', zero_division=0):.3f}")
+
+        st.subheader("Per Class Report")
+        report = classification_report(y_true, y_pred, output_dict=True,
+                                       zero_division=0)
+        st.dataframe(pd.DataFrame(report).transpose().round(3))
+
+        st.subheader("Confusion Matrix")
+        cm = confusion_matrix(y_true, y_pred, labels=res["classes"])
+        fig, ax = plt.subplots()
+        sns.heatmap(cm, annot=True, fmt="d", cmap="Blues",
+                    xticklabels=res["classes"], yticklabels=res["classes"], ax=ax)
+        ax.set_xlabel("Predicted")
+        ax.set_ylabel("True")
+        st.pyplot(fig)
+
+        st.subheader("Auto Labeled Data")
+        st.dataframe(res["labeled"].head())
+        st.download_button(
+            "Download auto labeled dataset",
+            data=res["labeled"].to_csv(index=False).encode("utf-8"),
+            file_name="auto_labeled_data.csv", mime="text/csv")
 
 
-
-            st.subheader("Training Progress")
-            final_pct = history["pct_labeled"].iloc[-1]
-            st.metric("Unlabeled data auto labeled", f"{final_pct:.1f}%")
-
-            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11, 4))
-            ax1.plot(history["round"], history["accuracy"], marker="o", color="#B31B1B")
-            ax1.set_xlabel("Round")
-            ax1.set_ylabel("Accuracy on held out set")
-            ax1.set_title("Accuracy across rounds")
-            ax2.plot(history["round"], history["pct_labeled"], marker="s", color="#1B5EB3")
-            ax2.set_xlabel("Round")
-            ax2.set_ylabel("Percent of data labeled")
-            ax2.set_title("Auto labeling progress")
-            fig.tight_layout()
-            st.pyplot(fig)
-
-            # Standard metrics, all measured on the held out labeled set.
-            st.subheader("Evaluation Metrics")
-            y_true, y_pred = res["hold_y"], res["final_pred"]
-            st.write(f"**Accuracy:** {accuracy_score(y_true, y_pred):.3f}")
-            st.write(
-                f"**Precision (weighted):** "
-                f"{precision_score(y_true, y_pred, average='weighted', zero_division=0):.3f}")
-            st.write(
-                f"**Recall (weighted):** "
-                f"{recall_score(y_true, y_pred, average='weighted', zero_division=0):.3f}")
-            st.write(
-                f"**F1 Score (weighted):** "
-                f"{f1_score(y_true, y_pred, average='weighted', zero_division=0):.3f}")
-
-            st.subheader("Per Class Report")
-            report = classification_report(y_true, y_pred, output_dict=True,
-                                           zero_division=0)
-            st.dataframe(pd.DataFrame(report).transpose().round(3))
-
-            st.subheader("Confusion Matrix")
-            cm = confusion_matrix(y_true, y_pred, labels=res["classes"])
-            fig, ax = plt.subplots()
-            sns.heatmap(cm, annot=True, fmt="d", cmap="Blues",
-                        xticklabels=res["classes"], yticklabels=res["classes"], ax=ax)
-            ax.set_xlabel("Predicted")
-            ax.set_ylabel("True")
-            st.pyplot(fig)
-
-            st.subheader("Auto Labeled Data")
-            st.dataframe(res["labeled"].head())
-            st.download_button(
-                "Download auto labeled dataset",
-                data=res["labeled"].to_csv(index=False).encode("utf-8"),
-                file_name="auto_labeled_data.csv", mime="text/csv")
-
-
-# 3.3.6 Unsupervised Learning (Clustering)
+# 6. Unsupervised Learning
 with tab_cluster:
-
+    st.header("6. Unsupervised Learning")
 
     if "ssl_clean" not in st.session_state:
         st.info("Impute the unlabeled data above before clustering.")
     elif reveal_button("show_cluster", "clustering tools"):
         data = st.session_state["ssl_clean"].copy()
         feature_cols = data.columns.tolist()
+
+        # Choosing K first: the elbow curve shows where extra clusters stop
+        # cutting WCSS much, the silhouette peak shows where they are best
+        # separated. Both are run on z score scaled features.
+        st.subheader("Find the Optimal Number of Clusters")
+        c1, c2 = st.columns(2)
+        k_min = c1.number_input("Smallest K to test", min_value=2, max_value=20,
+                                value=3, step=1)
+        k_max = c2.number_input("Largest K to test", min_value=3, max_value=20,
+                                value=8, step=1)
+        st.caption("Uses K-Means on standard (z score) scaled features.")
+
+        if st.button("Run elbow and silhouette analysis"):
+            if k_max <= k_min:
+                st.warning("The largest K must be greater than the smallest K.")
+            else:
+                try:
+                    with st.spinner("Fitting K-Means for each K..."):
+                        st.session_state["ssl_k_scan"] = elbow_silhouette_scan(
+                            scale_features(data[feature_cols], "Standard (z score)"),
+                            k_min, k_max)
+                except Exception as e:
+                    show_library_error("Elbow and silhouette analysis", e)
+
+        if "ssl_k_scan" in st.session_state:
+            scan = st.session_state["ssl_k_scan"]
+
+            # One row per K, with both scores side by side for comparison.
+            st.write("**K-Means, Elbow (WCSS) and Silhouette values**")
+            st.dataframe(
+                scan.style.format({"WCSS": "{:,.2f}", "Silhouette": "{:.4f}"}),
+                hide_index=True, use_container_width=True)
+
+            best = scan.loc[scan["Silhouette"].idxmax()]
+
+            p1, p2 = st.columns(2)
+            with p1:
+                fig, ax = plt.subplots(figsize=(5, 4))
+                ax.plot(scan["K"], scan["WCSS"], marker="o", color="#1B5EB3")
+                ax.set_xlabel("Number of clusters")
+                ax.set_ylabel("WCSS")
+                ax.set_title("Elbow Plot")
+                fig.tight_layout()
+                st.pyplot(fig)
+            with p2:
+                fig, ax = plt.subplots(figsize=(5, 4))
+                ax.plot(scan["K"], scan["Silhouette"], marker="o", color="#B31B1B")
+                # Mark the peak so the best K is easy to spot.
+                ax.plot(best["K"], best["Silhouette"], marker="o", markersize=10,
+                        color="#444444")
+                ax.set_xlabel("Number of clusters")
+                ax.set_ylabel("Silhouette score")
+                ax.set_title("Silhouette Plot")
+                fig.tight_layout()
+                st.pyplot(fig)
+
+            st.success(
+                f"Best Silhouette result: K={int(best['K'])} with score "
+                f"{best['Silhouette']:.4f}.")
 
         method = st.selectbox(
             "Clustering method",
