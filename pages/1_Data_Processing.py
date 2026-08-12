@@ -214,7 +214,7 @@ def infer_variable_role(df: pd.DataFrame, column: str) -> str:
     name = str(column).strip().lower()
     unique = int(series.nunique(dropna=True))
     unique_ratio = unique / max(len(series), 1)
-    if name in {"target", "label", "class", "outcome", "response", "survived"}:
+    if name in {"target", "label", "class", "outcome", "response"}:
         return "Target"
     if (
         is_metadata_column(column) or name.endswith("id")
@@ -713,8 +713,8 @@ if df is not None:
 
     st.subheader("Variable-Type Conversion")
     st.caption(
-        "Assign the analytical type explicitly. For example, Titanic Pclass and "
-        "Survived may be treated as categorical even though they are stored as integers."
+        "Assign the analytical type explicitly. A variable's imported storage type "
+        "may differ from its intended analytical role."
     )
     type_col1, type_col2 = st.columns(2)
     with type_col1:
@@ -946,9 +946,9 @@ if df is not None:
     high_cardinality = [c for c in encoding_candidates if df[c].nunique(dropna=True) > 20]
     if high_cardinality:
         st.warning(
-            "High-cardinality columns are not selected automatically: "
-            + ", ".join(high_cardinality)
-            + ". Encoding them may create many new columns."
+            f"{len(high_cardinality)} high-cardinality categorical or text "
+            "feature(s) were excluded from automatic one-hot selection because "
+            "encoding them may create an excessive number of new columns."
         )
 
     binary_candidates = [
