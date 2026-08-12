@@ -263,7 +263,7 @@ tabs = st.tabs(
         "6. Unsupervised Learning",
     ]
 )
-
+tab_load = tabs[0]
 tab_quality = tabs[1]
 tab_impute = tabs[2]
 tab_ssl = tabs[3]
@@ -273,7 +273,7 @@ tab_cluster = tabs[5]
 
 # 1. Large Unlabeled Data
 with tab_load:
-    st.header("1. Large Unlabeled Data")
+   
 
     # Chunked reading buffers one slice of the file at a time instead of
     # pulling the whole file into RAM at once.
