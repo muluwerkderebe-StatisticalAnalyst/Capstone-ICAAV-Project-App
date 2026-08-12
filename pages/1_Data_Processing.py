@@ -7,21 +7,36 @@ import scipy.io
 from PIL import Image
 from mpl_toolkits.mplot3d import Axes3D  # noqa: F401 (registers 3D projection)
 from sklearn.decomposition import PCA
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import MinMaxScaler, RobustScaler, StandardScaler
 from sklearn.feature_selection import mutual_info_classif, mutual_info_regression
 import matplotlib.pyplot as plt
 
 # =========================================================
-# PAGE BRANDING
+# PAGE BRANDING — MATCHES PAGE 2
 # =========================================================
-st.markdown("""
-    <h2 style='text-align: center; color: #B31B1B; margin-bottom: 0.1rem;'>
-        Tab 1 - Data Loading, Feature Engineering, and Visualization
-    </h2>
-    <p style='text-align: center; color: gray; margin-top: 0;'>
-        iCAAV Core - Advanced Biomechatronics and Locomotion Laboratory - Carleton University
-    </p>
-""", unsafe_allow_html=True)
+header_left, header_middle, header_right = st.columns([1, 3, 1])
+with header_left:
+    try:
+        st.image("assets/icaav_logo.png", width=100)
+    except Exception:
+        st.markdown("**iCAAV**")
+with header_middle:
+    st.markdown("""
+        <h2 style='text-align:center;color:#B31B1B;margin-bottom:0.2rem;'>
+            Data Loading, Feature Engineering, and Visualization
+        </h2>
+        <p style='text-align:center;color:gray;margin-top:0;'>
+            Import • Clean • Normalize • Engineer • Visualize • Export
+            <br>iCAAV Core • Carleton University
+        </p>
+    """, unsafe_allow_html=True)
+with header_right:
+    try:
+        st.image("assets/carleton_logo.png", width=100)
+    except Exception:
+        st.markdown("**Carleton**")
+
+st.markdown("---")
 
 # =========================================================
 # SESSION STATE INITIALIZATION
@@ -33,6 +48,10 @@ defaults = {
     "engineered_df": None,     # extracted statistical feature set
     "saved_feature_sets": {},  # in-session named feature sets
     "selected_important_df": None,  # post-visualization feature subset for export
+    "normalized_df": None,          # independent normalized copy
+    "normalization_scaler": None,   # fitted scaler for reproducibility
+    "normalization_method": None,
+    "use_normalized_downstream": False,
 }
 for k, v in defaults.items():
     if k not in st.session_state:
@@ -337,8 +356,9 @@ def prepare_pca_feature_matrix(
 
 
 page_tabs = st.tabs([
-    "1. Data Import", "2. Preprocessing", "3. Feature Extraction",
-    "4. Feature Selection", "5. Visualization", "6. PCA & Statistics", "7. Export",
+    "1. Data Import", "2. Preprocessing", "3. Normalization",
+    "4. Feature Extraction", "5. Feature Selection", "6. Visualization",
+    "7. PCA & Statistics", "8. Export",
 ])
 _tab_context = page_tabs[0]
 _tab_context.__enter__()
@@ -384,6 +404,9 @@ if uploaded_file is not None:
             st.session_state.df = new_df
             st.session_state.feature_cols = []
             st.session_state.label_col = None
+            st.session_state.normalized_df = None
+            st.session_state.normalization_scaler = None
+            st.session_state.use_normalized_downstream = False
 
     except Exception as e:
         st.error(f"Failed to load file: {e}")
@@ -513,6 +536,9 @@ if df is not None:
         if st.button("Drop Duplicate Rows"):
             df = df.drop_duplicates().reset_index(drop=True)
             st.session_state.df = df
+            st.session_state.normalized_df = None
+            st.session_state.normalization_scaler = None
+            st.session_state.use_normalized_downstream = False
             st.success("Duplicate rows removed from the in-session dataset.")
             st.dataframe(df.head())
 
@@ -555,17 +581,137 @@ if df is not None:
                 st.info("No missing-value changes were applied.")
             st.session_state.df = df
             if fill_strategy != "Do nothing":
+                st.session_state.normalized_df = None
+                st.session_state.normalization_scaler = None
+                st.session_state.use_normalized_downstream = False
                 st.success("Missing value handling applied.")
                 st.dataframe(df.head())
 
-    # Client requested removing user-controlled normalization/standardization from Tab 1.
-    st.caption("Normalization and standardization controls were removed from preprocessing; data is not scaled in this section.")
+    st.caption("Scaling is handled independently in Tab 3 so the cleaned dataset remains unchanged.")
 
 st.markdown("---")
 
 # =========================================================
 _tab_context.__exit__(None, None, None)
 _tab_context = page_tabs[2]
+_tab_context.__enter__()
+
+# =========================================================
+# 3.1.2 INDEPENDENT FEATURE NORMALIZATION
+# =========================================================
+st.header("3.1.2 Feature Normalization")
+st.caption(
+    "Create a separate normalized copy. Labels, metadata, and unselected columns "
+    "are preserved without modification."
+)
+
+if df is None:
+    st.info("Upload and preprocess a dataset before normalization.")
+else:
+    available_scale_cols = numeric_feature_columns(
+        df, st.session_state.label_col, exclude_metadata=True
+    )
+    if not available_scale_cols:
+        st.warning("No eligible numeric feature columns are available for normalization.")
+    else:
+        selected_scale_cols = st.multiselect(
+            "Select Numeric Features to Normalize",
+            available_scale_cols,
+            default=[c for c in st.session_state.feature_cols if c in available_scale_cols]
+                    or available_scale_cols,
+            key="normalization_columns",
+        )
+        scaling_method = st.selectbox(
+            "Select Scaling Method",
+            [
+                "Z-score Standardization",
+                "Min-Max Normalization (0–1)",
+                "Robust Scaling",
+            ],
+            help=(
+                "Z-score centers features at 0 with unit variance; Min-Max maps "
+                "features to 0–1; Robust Scaling is less sensitive to outliers."
+            ),
+        )
+
+        if selected_scale_cols:
+            invalid_cols = [
+                c for c in selected_scale_cols
+                if df[c].replace([np.inf, -np.inf], np.nan).isna().any()
+            ]
+            constants = constant_columns(df, selected_scale_cols)
+            if invalid_cols:
+                st.warning(
+                    "Resolve missing or infinite values before scaling: "
+                    + ", ".join(invalid_cols)
+                )
+            if constants:
+                st.warning(
+                    "Constant columns will be excluded because they contain no "
+                    "scalable variation: " + ", ".join(constants)
+                )
+
+            scale_ready_cols = [
+                c for c in selected_scale_cols
+                if c not in invalid_cols and c not in constants
+            ]
+            if st.button("Apply Normalization", type="primary"):
+                if not scale_ready_cols:
+                    st.error("No valid selected features are available to normalize.")
+                else:
+                    scaler_options = {
+                        "Z-score Standardization": StandardScaler(),
+                        "Min-Max Normalization (0–1)": MinMaxScaler(),
+                        "Robust Scaling": RobustScaler(),
+                    }
+                    scaler = scaler_options[scaling_method]
+                    normalized_df = df.copy()
+                    normalized_df[scale_ready_cols] = scaler.fit_transform(
+                        df[scale_ready_cols]
+                    )
+                    st.session_state.normalized_df = normalized_df
+                    st.session_state.normalization_scaler = scaler
+                    st.session_state.normalization_method = scaling_method
+                    st.success(
+                        f"{len(scale_ready_cols)} feature(s) transformed using "
+                        f"{scaling_method}."
+                    )
+
+        normalized_df = st.session_state.normalized_df
+        if normalized_df is not None:
+            st.subheader("Normalized Dataset Preview")
+            st.dataframe(normalized_df.head(20), use_container_width=True)
+            preview_cols = [c for c in selected_scale_cols if c in normalized_df.columns]
+            if preview_cols:
+                with st.expander("Normalized Feature Summary", expanded=False):
+                    st.dataframe(normalized_df[preview_cols].describe().T)
+
+            use_normalized = st.checkbox(
+                "Use normalized dataset in Feature Extraction, Visualization, and PCA",
+                value=st.session_state.use_normalized_downstream,
+            )
+            st.session_state.use_normalized_downstream = use_normalized
+            st.download_button(
+                "Download Normalized Dataset (CSV)",
+                to_csv_bytes(normalized_df),
+                file_name="normalized_dataset.csv",
+                mime="text/csv",
+            )
+            st.download_button(
+                "Download Fitted Scaler (PKL)",
+                to_pickle_bytes(st.session_state.normalization_scaler),
+                file_name="normalization_scaler.pkl",
+                mime="application/octet-stream",
+            )
+
+# Select the downstream working copy without overwriting the cleaned source.
+if st.session_state.use_normalized_downstream and st.session_state.normalized_df is not None:
+    df = st.session_state.normalized_df
+
+st.markdown("---")
+
+_tab_context.__exit__(None, None, None)
+_tab_context = page_tabs[3]
 _tab_context.__enter__()
 
 # 3.1.2 / 3.1.3 FEATURE EXTRACTION & WINDOWING
@@ -621,7 +767,7 @@ st.markdown("---")
 
 # =========================================================
 _tab_context.__exit__(None, None, None)
-_tab_context = page_tabs[3]
+_tab_context = page_tabs[4]
 _tab_context.__enter__()
 
 # 3.1.4 FEATURE SELECTION AND MANAGEMENT
@@ -676,7 +822,7 @@ st.markdown("---")
 
 # =========================================================
 _tab_context.__exit__(None, None, None)
-_tab_context = page_tabs[4]
+_tab_context = page_tabs[5]
 _tab_context.__enter__()
 
 # 3.1.5 VISUALIZATION
@@ -1025,7 +1171,7 @@ st.markdown("---")
 
 # =========================================================
 _tab_context.__exit__(None, None, None)
-_tab_context = page_tabs[5]
+_tab_context = page_tabs[6]
 _tab_context.__enter__()
 
 # 3.1.6 PCA AND STATISTICAL ANALYSIS
@@ -1223,7 +1369,7 @@ st.markdown("---")
 
 # =========================================================
 _tab_context.__exit__(None, None, None)
-_tab_context = page_tabs[6]
+_tab_context = page_tabs[7]
 _tab_context.__enter__()
 
 # 3.1.8 EXPORT CAPABILITY
@@ -1231,6 +1377,8 @@ _tab_context.__enter__()
 st.header("3.1.8 Export Capability")
 
 export_options = ["Raw / Preprocessed Data", "Engineered Feature Set"]
+if st.session_state.normalized_df is not None:
+    export_options.append("Normalized Dataset")
 if st.session_state.selected_important_df is not None:
     export_options.append("Retained Important Features")
 
@@ -1243,6 +1391,8 @@ if export_target == "Raw / Preprocessed Data":
     export_df = df
 elif export_target == "Engineered Feature Set":
     export_df = st.session_state.engineered_df
+elif export_target == "Normalized Dataset":
+    export_df = st.session_state.normalized_df
 else:
     export_df = st.session_state.selected_important_df
 
@@ -1269,16 +1419,5 @@ if export_df is not None:
         )
 else:
     st.info("Nothing available to export yet for this selection.")
-
-st.markdown("---")
-# Logos were moved to the bottom per the client comment, keeping the top area
-# compact while still preserving project branding.
-footer_left, footer_mid, footer_right = st.columns([1, 2, 1], vertical_alignment="center")
-with footer_left:
-    st.image("assets/icaav_logo.png", width=110)
-with footer_mid:
-    st.caption("iCAAV Core - Advanced Biomechatronics and Locomotion Laboratory - Carleton University")
-with footer_right:
-    st.image("assets/carleton_logo.png", width=110)
 
 _tab_context.__exit__(None, None, None)
