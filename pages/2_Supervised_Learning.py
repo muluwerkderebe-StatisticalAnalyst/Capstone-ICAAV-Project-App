@@ -41,6 +41,7 @@ from sklearn.metrics import (
     precision_score,
     r2_score,
     recall_score,
+    roc_curve,
     roc_auc_score,
 )
 from sklearn.model_selection import GridSearchCV, cross_validate, train_test_split
@@ -247,6 +248,162 @@ def show_metric_cards(metrics: dict) -> None:
     columns = st.columns(min(5, len(metrics)))
     for index, (label, value) in enumerate(metrics.items()):
         columns[index % len(columns)].metric(label, f"{value:.4f}")
+
+
+def binary_model_scores(model, X) -> np.ndarray | None:
+    """Return continuous positive-class scores for a binary ROC curve."""
+    try:
+        if hasattr(model, "predict_proba"):
+            probabilities = np.asarray(model.predict_proba(X))
+            if probabilities.ndim == 2 and probabilities.shape[1] == 2:
+                return probabilities[:, 1]
+        if hasattr(model, "decision_function"):
+            scores = np.asarray(model.decision_function(X))
+            if scores.ndim == 1:
+                return scores
+    except Exception:
+        return None
+    return None
+
+
+def render_classification_comparison(comparison: dict, split: dict) -> None:
+    """Render testing metrics, ROC curves, and a selectable confusion matrix."""
+    table = comparison["table"]
+    fitted = comparison["models"]
+    metric_map = {
+        "Test Accuracy": "Accuracy",
+        "Test Precision": "Precision",
+        "Test Recall": "Recall",
+        "Test F1": "F1",
+        "Test ROC AUC": "ROC AUC",
+    }
+    available = [column for column in metric_map if column in table.columns]
+
+    if available:
+        chart_df = table[["Model"] + available].dropna(subset=available, how="all")
+        long_df = chart_df.melt(
+            id_vars="Model", value_vars=available,
+            var_name="Metric", value_name="Score",
+        )
+        long_df["Metric"] = long_df["Metric"].map(metric_map)
+        fig, ax = plt.subplots(figsize=(12, 5.5))
+        sns.barplot(
+            data=long_df, x="Model", y="Score", hue="Metric", ax=ax,
+            palette={
+                "Accuracy": "#C83349", "Precision": "#4C9AD4",
+                "Recall": "#E4A12C", "F1": "#7657E8", "ROC AUC": "#55AD7A",
+            },
+        )
+        ax.set_title("Performance Metrics Across All Models", fontweight="bold")
+        ax.set_xlabel("")
+        ax.set_ylabel("Score")
+        ax.set_ylim(0, 1.05)
+        ax.tick_params(axis="x", rotation=25)
+        ax.legend(title="", ncol=min(5, len(available)), loc="upper center")
+        ax.grid(axis="y", alpha=0.25)
+        fig.tight_layout()
+        st.pyplot(fig, use_container_width=True)
+        plt.close(fig)
+
+    y_test = np.asarray(split["y_test"])
+    classes = np.unique(y_test)
+    left, right = st.columns(2)
+
+    with left:
+        st.subheader("ROC Curves — All Models")
+        if len(classes) != 2:
+            st.info("The combined ROC chart is displayed only for binary classification.")
+        else:
+            fig, ax = plt.subplots(figsize=(7, 5))
+            plotted = 0
+            positive_class = classes[1]
+            y_binary = (y_test == positive_class).astype(int)
+            for model_name, model in fitted.items():
+                scores = binary_model_scores(model, split["X_test"])
+                if scores is None:
+                    continue
+                fpr, tpr, _ = roc_curve(y_binary, scores)
+                auc_value = roc_auc_score(y_binary, scores)
+                ax.plot(fpr, tpr, linewidth=2, label=f"{model_name} ({auc_value:.3f})")
+                plotted += 1
+            ax.plot([0, 1], [0, 1], "--", color="gray", label="Random (0.500)")
+            ax.set_xlabel("False Positive Rate")
+            ax.set_ylabel("True Positive Rate")
+            ax.set_xlim(0, 1)
+            ax.set_ylim(0, 1.02)
+            ax.grid(alpha=0.25)
+            if plotted:
+                ax.legend(fontsize=8, loc="lower right")
+                fig.tight_layout()
+                st.pyplot(fig, use_container_width=True)
+            else:
+                st.info("The compared models do not provide probability or decision scores.")
+            plt.close(fig)
+
+    with right:
+        st.subheader("Confusion Matrix")
+        valid_models = list(fitted)
+        if valid_models:
+            selected = st.selectbox(
+                "Model for confusion matrix", valid_models,
+                key=state_key("comparison_confusion_model"),
+            )
+            prediction = fitted[selected].predict(split["X_test"])
+            matrix_labels = np.unique(np.concatenate([y_test, np.asarray(prediction)]))
+            cm = confusion_matrix(y_test, prediction, labels=matrix_labels)
+            fig, ax = plt.subplots(figsize=(7, 5))
+            sns.heatmap(
+                cm, annot=True, fmt="d", cmap="RdYlGn",
+                xticklabels=matrix_labels, yticklabels=matrix_labels, ax=ax,
+            )
+            ax.set_title(f"Confusion Matrix — {selected}", fontweight="bold")
+            ax.set_xlabel("Predicted")
+            ax.set_ylabel("Actual")
+            fig.tight_layout()
+            st.pyplot(fig, use_container_width=True)
+            plt.close(fig)
+
+
+def render_regression_comparison(comparison: dict, split: dict) -> None:
+    """Render regression errors and predicted-versus-actual diagnostics."""
+    table = comparison["table"]
+    fitted = comparison["models"]
+    error_cols = [c for c in ["Test RMSE", "Test MAE"] if c in table.columns]
+    if error_cols:
+        long_df = table[["Model"] + error_cols].melt(
+            id_vars="Model", value_vars=error_cols,
+            var_name="Metric", value_name="Error",
+        )
+        long_df["Metric"] = long_df["Metric"].str.replace("Test ", "", regex=False)
+        fig, ax = plt.subplots(figsize=(10, 4.8))
+        sns.barplot(data=long_df, x="Model", y="Error", hue="Metric", ax=ax)
+        ax.set_title("Regression Error Across All Models", fontweight="bold")
+        ax.set_xlabel("")
+        ax.tick_params(axis="x", rotation=25)
+        ax.grid(axis="y", alpha=0.25)
+        fig.tight_layout()
+        st.pyplot(fig, use_container_width=True)
+        plt.close(fig)
+
+    if fitted:
+        selected = st.selectbox(
+            "Model for predicted-versus-actual plot", list(fitted),
+            key=state_key("comparison_regression_model"),
+        )
+        actual = np.asarray(split["y_test"])
+        predicted = fitted[selected].predict(split["X_test"])
+        lower = float(min(np.min(actual), np.min(predicted)))
+        upper = float(max(np.max(actual), np.max(predicted)))
+        fig, ax = plt.subplots(figsize=(7, 5))
+        ax.scatter(actual, predicted, alpha=0.7, color="#4C9AD4")
+        ax.plot([lower, upper], [lower, upper], "--", color="#B31B1B")
+        ax.set_title(f"Predicted vs. Actual — {selected}", fontweight="bold")
+        ax.set_xlabel("Actual")
+        ax.set_ylabel("Predicted")
+        ax.grid(alpha=0.25)
+        fig.tight_layout()
+        st.pyplot(fig, use_container_width=True)
+        plt.close(fig)
 
 
 def render_evaluation(bundle: dict) -> None:
@@ -632,15 +789,42 @@ with tabs[4]:
         comparison = st.session_state.get(state_key("comparison"))
         if comparison:
             table = comparison["table"]
-            st.dataframe(table, use_container_width=True)
-            primary = "Test Accuracy" if split["problem_type"] == "Classification" else "Test MAE"
-            if primary in table.columns:
-                plot_data = table.dropna(subset=[primary])
-                fig, ax = plt.subplots(figsize=(8, 4))
-                sns.barplot(data=plot_data, x="Model", y=primary, ax=ax, color="#B31B1B")
-                ax.tick_params(axis="x", rotation=30)
-                ax.set_title(f"Model Comparison - {primary}")
-                st.pyplot(fig)
+            valid_table = table[table.get("Error", pd.Series(index=table.index, dtype=object)).isna()].copy()
+
+            if split["problem_type"] == "Classification" and "Test Accuracy" in valid_table.columns:
+                best_row = valid_table.loc[valid_table["Test Accuracy"].idxmax()]
+                st.subheader(f"Best Testing Model: {best_row['Model']}")
+                card_metrics = [
+                    ("Accuracy", "Test Accuracy"),
+                    ("Precision", "Test Precision"),
+                    ("Recall", "Test Recall"),
+                    ("F1 Score", "Test F1"),
+                    ("ROC AUC", "Test ROC AUC"),
+                ]
+                cards = st.columns(5)
+                for card, (label, column) in zip(cards, card_metrics):
+                    value = best_row.get(column, np.nan)
+                    display = "N/A" if pd.isna(value) else (
+                        f"{value:.3f}" if label == "ROC AUC" else f"{value:.1%}"
+                    )
+                    card.metric(label, display)
+            elif split["problem_type"] == "Regression" and "Test MAE" in valid_table.columns:
+                best_row = valid_table.loc[valid_table["Test MAE"].idxmin()]
+                st.subheader(f"Lowest-MAE Testing Model: {best_row['Model']}")
+                cards = st.columns(4)
+                for card, column in zip(cards, ["Test MAE", "Test RMSE", "Test MSE", "Test R2"]):
+                    value = best_row.get(column, np.nan)
+                    card.metric(column.replace("Test ", ""), "N/A" if pd.isna(value) else f"{value:.4f}")
+
+            st.subheader("All Models vs. Testing Metrics")
+            test_columns = ["Model"] + [c for c in table.columns if c.startswith("Test ")] + (["Error"] if "Error" in table else [])
+            st.dataframe(table[test_columns], use_container_width=True)
+
+            if split["problem_type"] == "Classification":
+                render_classification_comparison(comparison, split)
+            else:
+                render_regression_comparison(comparison, split)
+
             st.download_button(
                 "Download Model Comparison CSV",
                 table.to_csv(index=False).encode("utf-8"),
