@@ -234,7 +234,7 @@ render_header(
         "<br>Advanced Biomechatronics and Locomotion Laboratory"
     ),
 )
-st.title("Tab 3. Semi-Supervised and Unsupervised Learning")
+st.title("Semi-Supervised and Unsupervised Learning")
 
 # Keep every original task in its existing container and order, but present
 # the five tasks as compact horizontal tabs instead of one long page.
@@ -256,7 +256,7 @@ tab_cluster = tabs[4]
 
 # 3.3.1 Large Unlabeled Data Handling
 with tab_load:
-    st.header("3.3.1 Load Large Unlabeled Datasets")
+    st.header("Load Large Unlabeled Datasets")
 
     # Chunked reading buffers one slice of the file at a time instead of
     # pulling the whole file into RAM at once.
@@ -327,7 +327,7 @@ with tab_load:
 
 # 3.3.2 Data Quality Analysis
 with tab_quality:
-    st.header("3.3.2 Data Quality Analysis")
+    st.header("Data Quality Analysis")
 
     if "ssl_raw" not in st.session_state:
         st.info("Load a dataset above to analyze its quality.")
@@ -387,7 +387,7 @@ with tab_quality:
 
 # 3.3.3 Data Imputation
 with tab_impute:
-    st.header("3.3.3 Data Imputation")
+    st.header("Data Imputation")
 
     if "ssl_raw" not in st.session_state:
         st.info("Load a dataset above before imputing.")
@@ -442,7 +442,7 @@ with tab_impute:
 
 # 3.3.4 / 3.3.5 Semi-Supervised Learning and Evaluation
 with tab_ssl:
-    st.header("3.3.4 Semi-Supervised Learning (Self Training)")
+    st.header("Semi-Supervised Learning (Self Training)")
 
     if "ssl_clean" not in st.session_state:
         st.info("Impute the unlabeled data above before running SSL.")
@@ -603,7 +603,7 @@ with tab_ssl:
             res = st.session_state["ssl_result"]
             history = res["history"]
 
-            st.header("3.3.5 SSL Evaluation")
+            st.header(" SSL Evaluation")
 
             st.subheader("Training Progress")
             final_pct = history["pct_labeled"].iloc[-1]
@@ -659,7 +659,7 @@ with tab_ssl:
 
 # 3.3.6 Unsupervised Learning (Clustering)
 with tab_cluster:
-    st.header("3.3.6 Unsupervised Learning (Clustering)")
+    st.header("Unsupervised Learning (Clustering)")
 
     if "ssl_clean" not in st.session_state:
         st.info("Impute the unlabeled data above before clustering.")
