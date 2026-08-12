@@ -482,7 +482,7 @@ tabs = st.tabs(
 # 1. Data Import & Explore
 # ---------------------------------------------------------------------------
 with tabs[0]:
-    st.header("1. Data Import and Exploration")
+    
     uploaded = st.file_uploader("Upload a supervised-learning dataset (CSV)", type=["csv"], key=state_key("upload"))
 
     if uploaded is not None:
@@ -553,7 +553,7 @@ with tabs[0]:
 # 2. Data Preparation
 # ---------------------------------------------------------------------------
 with tabs[1]:
-    st.header("2. Data Preparation")
+    
     df = st.session_state.get(state_key("df"))
     setup = st.session_state.get(state_key("setup"))
     if df is None or not setup or not setup["features"]:
@@ -604,7 +604,7 @@ with tabs[1]:
 # 3. Train/Test Split
 # ---------------------------------------------------------------------------
 with tabs[2]:
-    st.header("3. Train / Test Split")
+   
     df = st.session_state.get(state_key("df"))
     setup = st.session_state.get(state_key("setup"))
     preparation = st.session_state.get(state_key("preparation"))
@@ -667,7 +667,7 @@ with tabs[2]:
 # 4. Model Training
 # ---------------------------------------------------------------------------
 with tabs[3]:
-    st.header("4. Model Selection and Training")
+    
     split = st.session_state.get(state_key("split"))
     if split is None:
         st.info("Create the train/test split in Step 3 first.")
@@ -755,7 +755,7 @@ with tabs[3]:
 # 5. Model Comparison
 # ---------------------------------------------------------------------------
 with tabs[4]:
-    st.header("5. Model Comparison")
+
     split = st.session_state.get(state_key("split"))
     if split is None:
         st.info("Create the train/test split in Step 3 first.")
@@ -837,7 +837,7 @@ with tabs[4]:
 # 6. Validation & Tuning
 # ---------------------------------------------------------------------------
 with tabs[5]:
-    st.header("6. Cross-Validation and Hyperparameter Tuning")
+   
     split = st.session_state.get(state_key("split"))
     if split is None:
         st.info("Create the train/test split in Step 3 first.")
@@ -898,7 +898,7 @@ with tabs[5]:
 # 7. Save, Load & Predict
 # ---------------------------------------------------------------------------
 with tabs[6]:
-    st.header("7. Save, Load, and Make a Live Prediction")
+    
     trained = st.session_state.get(state_key("trained_bundle"))
     tuned = st.session_state.get(state_key("tuned_bundle"))
     comparison = st.session_state.get(state_key("comparison"))
