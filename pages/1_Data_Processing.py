@@ -366,7 +366,7 @@ _tab_context.__enter__()
 # =========================================================
 # 3.1.1 DATA IMPORT
 # =========================================================
-st.header("3.1.1 Data Import")
+st.header("Data Import")
 
 uploaded_file = st.file_uploader(
     "Import Dataset (CSV, Excel, or MATLAB .mat)",
@@ -519,7 +519,7 @@ _tab_context.__enter__()
 
 # 3.1.7 DATA PREPROCESSING
 # =========================================================
-st.header("3.1.7 Data Preprocessing")
+st.header("Data Preprocessing")
 
 if df is not None:
     numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
@@ -599,7 +599,7 @@ _tab_context.__enter__()
 # =========================================================
 # 3.1.2 INDEPENDENT FEATURE NORMALIZATION
 # =========================================================
-st.header("3.1.2 Feature Normalization")
+st.header("Feature Normalization")
 st.caption(
     "Create a separate normalized copy. Labels, metadata, and unselected columns "
     "are preserved without modification."
@@ -716,7 +716,7 @@ _tab_context.__enter__()
 
 # 3.1.2 / 3.1.3 FEATURE EXTRACTION & WINDOWING
 # =========================================================
-st.header("3.1.2 – 3.1.3 Feature Extraction (Statistical Features & Windowing)")
+st.header("Feature Extraction (Statistical Features & Windowing)")
 
 if df is not None and channels:
     window_size = st.number_input("Window Size", min_value=1, value=50)
@@ -827,7 +827,7 @@ _tab_context.__enter__()
 
 # 3.1.5 VISUALIZATION
 # =========================================================
-st.header("3.1.5 Visualization")
+st.header("Visualization")
 
 if df is not None:
     data_source = st.radio(
@@ -1176,7 +1176,7 @@ _tab_context.__enter__()
 
 # 3.1.6 PCA AND STATISTICAL ANALYSIS
 # =========================================================
-st.header("3.1.6 PCA and Statistical Analysis")
+st.header("PCA and Statistical Analysis")
 
 if df is not None:
     pca_source = st.radio(
@@ -1374,7 +1374,7 @@ _tab_context.__enter__()
 
 # 3.1.8 EXPORT CAPABILITY
 # =========================================================
-st.header("3.1.8 Export Capability")
+st.header("Export Capability")
 
 export_options = ["Raw / Preprocessed Data", "Engineered Feature Set"]
 if st.session_state.normalized_df is not None:
