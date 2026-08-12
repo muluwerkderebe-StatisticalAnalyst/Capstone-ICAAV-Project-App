@@ -918,7 +918,7 @@ with tabs[6]:
                 "feature_examples": source_df[split["features"]].copy(),
             }
 
-    st.subheader("Save a Complete Model Bundle")
+    
     if available:
         save_choice = st.selectbox("Model to save", list(available), key=state_key("save_choice"))
         st.download_button(
