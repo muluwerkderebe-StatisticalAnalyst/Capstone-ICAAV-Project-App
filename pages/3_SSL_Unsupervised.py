@@ -256,7 +256,7 @@ tab_cluster = tabs[4]
 
 # 3.3.1 Large Unlabeled Data Handling
 with tab_load:
-    st.header("Load Large Unlabeled Datasets")
+
 
     # Chunked reading buffers one slice of the file at a time instead of
     # pulling the whole file into RAM at once.
