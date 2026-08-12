@@ -327,7 +327,7 @@ with tab_load:
 
 # 3.3.2 Data Quality Analysis
 with tab_quality:
-    st.header("Data Quality Analysis")
+
 
     if "ssl_raw" not in st.session_state:
         st.info("Load a dataset above to analyze its quality.")
@@ -387,7 +387,7 @@ with tab_quality:
 
 # 3.3.3 Data Imputation
 with tab_impute:
-    st.header("Data Imputation")
+  
 
     if "ssl_raw" not in st.session_state:
         st.info("Load a dataset above before imputing.")
@@ -442,7 +442,7 @@ with tab_impute:
 
 # 3.3.4 / 3.3.5 Semi-Supervised Learning and Evaluation
 with tab_ssl:
-    st.header("Semi-Supervised Learning (Self Training)")
+   
 
     if "ssl_clean" not in st.session_state:
         st.info("Impute the unlabeled data above before running SSL.")
@@ -603,7 +603,7 @@ with tab_ssl:
             res = st.session_state["ssl_result"]
             history = res["history"]
 
-            st.header(" SSL Evaluation")
+
 
             st.subheader("Training Progress")
             final_pct = history["pct_labeled"].iloc[-1]
@@ -659,7 +659,7 @@ with tab_ssl:
 
 # 3.3.6 Unsupervised Learning (Clustering)
 with tab_cluster:
-    st.header("Unsupervised Learning (Clustering)")
+
 
     if "ssl_clean" not in st.session_state:
         st.info("Impute the unlabeled data above before clustering.")
