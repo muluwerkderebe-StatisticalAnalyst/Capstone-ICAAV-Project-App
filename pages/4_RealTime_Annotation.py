@@ -28,7 +28,7 @@ with col2:
     st.markdown(
         """
         <div class="icaav-page-title">
-            Tab 4 — Real-Time Testing, Visualization, and Annotation
+            Real-Time Testing, Visualization, and Annotation
         </div>
 
         <div class="icaav-page-subtitle">
@@ -108,7 +108,7 @@ _tab_context.__enter__()
 # -----------------------------
 # SECTION 1 — LOAD DATASET
 # -----------------------------
-st.header("1. Load Dataset")
+
  
 uploaded = st.file_uploader("Upload dataset (CSV)", type=["csv"])
  
@@ -215,7 +215,7 @@ _tab_context.__enter__()
 # -----------------------------
 # SECTION 2 — LOAD TRAINED MODEL
 # -----------------------------
-st.header("2. Load Trained Model")
+st.header("Load Trained Model")
  
 model_file = st.file_uploader("Upload trained model (.pkl)", type=["pkl"])
  
@@ -286,7 +286,7 @@ _tab_context.__enter__()
 # -----------------------------
 # SECTION 3 — DATA SOURCE & PLAYBACK CONTROLS
 # -----------------------------
-st.header("3. Data Source & Playback Controls")
+st.header("Data Source & Playback Controls")
  
 data_source = st.radio(
     "Data Source",
@@ -413,7 +413,7 @@ _tab_context.__enter__()
 # -----------------------------
 # SECTION 4 — LIVE SIGNAL MONITOR
 # -----------------------------
-st.header("4. Live Signal Monitor")
+st.header("Live Signal Monitor")
  
 if st.session_state.playback_mode != "stopped" and st.session_state.active_value_cols:
     active_value_cols = st.session_state.active_value_cols
@@ -770,7 +770,7 @@ _tab_context.__enter__()
 # -----------------------------
 # SECTION 5 — ANNOTATION
 # -----------------------------
-st.header("5. Annotation")
+st.header("Annotation")
 st.caption("Pause playback/streaming to annotate the current row, then resume.")
  
 ann_col1, ann_col2 = st.columns([2, 1])
@@ -840,7 +840,7 @@ _tab_context.__enter__()
 # -----------------------------
 # SECTION 6 — EXPORT
 # -----------------------------
-st.header("6. Export")
+
 
 annotations = list(st.session_state.annotation_data)
 if not annotations:
