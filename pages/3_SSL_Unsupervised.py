@@ -344,7 +344,7 @@ with tab_load:
 
 # 2. Data Quality Analysis
 with tab_quality:
-    st.header("2. Data Quality Analysis")
+    
 
     if "ssl_raw" not in st.session_state:
         st.info("Load a dataset above to analyze its quality.")
@@ -404,7 +404,7 @@ with tab_quality:
 
 # 3. Data Imputation
 with tab_impute:
-    st.header("3. Data Imputation")
+  
 
     if "ssl_raw" not in st.session_state:
         st.info("Load a dataset above before imputing.")
@@ -459,7 +459,7 @@ with tab_impute:
 
 # 4. Semi-Supervised ML
 with tab_ssl:
-    st.header("4. Semi-Supervised ML")
+   
 
     if "ssl_clean" not in st.session_state:
         st.info("Impute the unlabeled data above before running SSL.")
@@ -620,7 +620,7 @@ with tab_ssl:
 
 # 5. SSL Evaluation
 with tab_eval:
-    st.header("5. SSL Evaluation")
+    
 
     # Results are rendered from session_state so they survive reruns and stay
     # visible while the training controls live in the previous tab.
@@ -684,7 +684,7 @@ with tab_eval:
 
 # 6. Unsupervised Learning
 with tab_cluster:
-    st.header("6. Unsupervised Learning")
+
 
     if "ssl_clean" not in st.session_state:
         st.info("Impute the unlabeled data above before clustering.")
