@@ -456,7 +456,7 @@ _tab_context.__enter__()
 # =========================================================
 # 3.1.1 DATA IMPORT
 # =========================================================
-st.header("Data Import")
+
 
 uploaded_file = st.file_uploader(
     "Import Dataset (CSV, Excel, or MATLAB .mat)",
@@ -663,7 +663,7 @@ _tab_context.__enter__()
 
 # 3.1.7 DATA PREPROCESSING
 # =========================================================
-st.header("Data Preprocessing")
+
 
 if df is not None:
     if st.button("Reset to Original Uploaded Dataset", key="reset_original_data"):
@@ -1084,7 +1084,7 @@ _tab_context.__enter__()
 # =========================================================
 # 3.1.2 INDEPENDENT FEATURE NORMALIZATION
 # =========================================================
-st.header("Feature Normalization")
+
 st.caption(
     "Create a separate normalized copy. Labels, metadata, and unselected columns "
     "are preserved without modification."
@@ -1205,7 +1205,7 @@ _tab_context.__enter__()
 
 # GENERAL TABULAR OR TIME-SERIES FEATURE ENGINEERING
 # =========================================================
-st.header("Feature Engineering and Extraction")
+
 engineering_mode = st.radio(
     "Feature-engineering mode",
     ["General Tabular Data", "Time-Series / Sensor Windowing"],
@@ -1334,7 +1334,7 @@ _tab_context.__enter__()
 
 # 3.1.4 FEATURE SELECTION AND MANAGEMENT
 # =========================================================
-st.header("Feature Selection and Management")
+
 
 if st.session_state.engineered_df is not None:
     feat_df = st.session_state.engineered_df
@@ -1429,7 +1429,7 @@ _tab_context.__enter__()
 
 # 3.1.5 VISUALIZATION
 # =========================================================
-st.header("Visualization")
+
 
 if df is not None:
     data_source = st.radio(
@@ -1778,7 +1778,7 @@ _tab_context.__enter__()
 
 # 3.1.6 PCA AND STATISTICAL ANALYSIS
 # =========================================================
-st.header("PCA and Statistical Analysis")
+
 
 if df is not None:
     pca_source = st.radio(
@@ -1976,7 +1976,7 @@ _tab_context.__enter__()
 
 # 3.1.8 EXPORT CAPABILITY
 # =========================================================
-st.header("Export Capability")
+
 
 export_options = ["Original Uploaded Data", "Cleaned / Encoded Data", "Engineered Feature Set"]
 if st.session_state.normalized_df is not None:
