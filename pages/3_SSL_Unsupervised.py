@@ -1,4 +1,4 @@
-"""Tab 3 — Semi-Supervised and Unsupervised Learning.
+"""Semi-Supervised and Unsupervised Learning.
 
 Five steps, stacked top to bottom: load a large unlabeled dataset, check its
 quality, impute missing values, auto label it with a pretrained model (self
@@ -244,7 +244,7 @@ def reveal_button(key, name):
 apply_theme()
 
 render_header(
-    title="Tab 3 — Semi-Supervised and Unsupervised Learning",
+    title="Semi-Supervised and Unsupervised Learning",
     subtitle_html=(
         "SSL • Clustering • Data Quality Analysis"
         "<br>Advanced Biomechatronics and Locomotion Laboratory"
@@ -263,7 +263,7 @@ tabs = st.tabs(
         "6. Unsupervised Learning",
     ]
 )
-tab_load = tabs[0]
+
 tab_quality = tabs[1]
 tab_impute = tabs[2]
 tab_ssl = tabs[3]
