@@ -2,6 +2,8 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import io
+import hashlib
+import json
 import pickle
 import scipy.io
 from PIL import Image
@@ -43,6 +45,7 @@ st.markdown("---")
 # =========================================================
 defaults = {
     "df": None,                # raw / preprocessed dataset
+    "original_df": None,       # untouched upload for restarting preprocessing
     "label_col": None,         # user-designated label/class column
     "feature_cols": [],        # user-designated feature/variable columns
     "engineered_df": None,     # extracted statistical feature set
@@ -52,6 +55,11 @@ defaults = {
     "normalization_scaler": None,   # fitted scaler for reproducibility
     "normalization_method": None,
     "use_normalized_downstream": False,
+    "data_source_id": None,
+    "encoding_history": [],
+    "variable_roles": {},
+    "processing_log": [],
+    "tabular_engineered_df": None,
 }
 for k, v in defaults.items():
     if k not in st.session_state:
@@ -181,6 +189,88 @@ def fill_missing_with_mode(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
             continue
         filled_df[col] = filled_df[col].fillna(mode_values.iloc[0])
     return filled_df, skipped_cols
+
+
+def clear_derived_artifacts() -> None:
+    """Invalidate outputs that no longer match the working dataframe."""
+    st.session_state.normalized_df = None
+    st.session_state.normalization_scaler = None
+    st.session_state.normalization_method = None
+    st.session_state.use_normalized_downstream = False
+    st.session_state.engineered_df = None
+    st.session_state.selected_important_df = None
+    st.session_state.tabular_engineered_df = None
+
+
+ROLE_OPTIONS = [
+    "Target", "Numerical Feature", "Categorical Feature", "Ordinal Feature",
+    "Identifier", "Datetime", "Free Text", "Excluded",
+]
+
+
+def infer_variable_role(df: pd.DataFrame, column: str) -> str:
+    """Recommend an analytical role without silently enforcing it."""
+    series = df[column]
+    name = str(column).strip().lower()
+    unique = int(series.nunique(dropna=True))
+    unique_ratio = unique / max(len(series), 1)
+    if name in {"target", "label", "class", "outcome", "response", "survived"}:
+        return "Target"
+    if (
+        is_metadata_column(column) or name.endswith("id")
+        or name.endswith("number") or name.endswith("_key")
+    ):
+        return "Identifier"
+    if pd.api.types.is_datetime64_any_dtype(series) or any(
+        token in name for token in ["date", "datetime", "timestamp"]
+    ):
+        return "Datetime"
+    if pd.api.types.is_numeric_dtype(series):
+        if unique <= 20:
+            return "Categorical Feature"
+        return "Numerical Feature"
+    if unique_ratio > 0.70 or unique > 100:
+        return "Free Text"
+    return "Categorical Feature"
+
+
+def initialize_variable_roles(df: pd.DataFrame) -> dict[str, str]:
+    return {column: infer_variable_role(df, column) for column in df.columns}
+
+
+def log_processing(action: str, details: dict | None = None) -> None:
+    entry = {"step": len(st.session_state.processing_log) + 1, "action": action}
+    if details:
+        entry.update(details)
+    st.session_state.processing_log = st.session_state.processing_log + [entry]
+
+
+def roles_for(role: str, df: pd.DataFrame) -> list[str]:
+    roles = st.session_state.variable_roles
+    return [column for column in df.columns if roles.get(column) == role]
+
+
+def convert_column_type(series: pd.Series, target_type: str) -> pd.Series:
+    """Convert a user-selected variable with explicit, auditable rules."""
+    if target_type == "Numeric":
+        return pd.to_numeric(series, errors="coerce")
+    if target_type == "Categorical":
+        return series.astype("category")
+    if target_type == "Text":
+        return series.astype("string")
+    if target_type == "Datetime":
+        return pd.to_datetime(series, errors="coerce")
+    if target_type == "Boolean":
+        mapping = {
+            "true": True, "false": False, "yes": True, "no": False,
+            "1": True, "0": False, "y": True, "n": False,
+        }
+        converted = series.map(
+            lambda value: mapping.get(str(value).strip().lower(), pd.NA)
+            if pd.notna(value) else pd.NA
+        )
+        return converted.astype("boolean")
+    return series
 
 
 # Shared visualization controls are converted into one config dictionary so
@@ -374,42 +464,47 @@ uploaded_file = st.file_uploader(
 )
 
 if uploaded_file is not None:
-    try:
-        if uploaded_file.name.endswith(".csv"):
-            new_df = pd.read_csv(uploaded_file)
+    source_id = f"{uploaded_file.name}:{hashlib.sha256(uploaded_file.getvalue()).hexdigest()}"
+    if source_id != st.session_state.data_source_id:
+        try:
+            if uploaded_file.name.endswith(".csv"):
+                new_df = pd.read_csv(uploaded_file)
 
-        elif uploaded_file.name.endswith((".xlsx", ".xls")):
-            new_df = pd.read_excel(uploaded_file)
+            elif uploaded_file.name.endswith((".xlsx", ".xls")):
+                new_df = pd.read_excel(uploaded_file)
 
-        elif uploaded_file.name.endswith(".mat"):
-            mat_dict = scipy.io.loadmat(uploaded_file)
-            mat_vars = [k for k in mat_dict.keys() if not k.startswith("__")]
-            if not mat_vars:
-                st.error("No usable variables found in this .mat file.")
-                new_df = None
+            elif uploaded_file.name.endswith(".mat"):
+                mat_dict = scipy.io.loadmat(uploaded_file)
+                mat_vars = [k for k in mat_dict.keys() if not k.startswith("__")]
+                if not mat_vars:
+                    st.error("No usable variables found in this .mat file.")
+                    new_df = None
+                else:
+                    var_choice = st.selectbox("Select MATLAB variable to import", mat_vars)
+                    array = np.asarray(mat_dict[var_choice])
+                    if array.ndim == 1:
+                        array = array.reshape(-1, 1)
+                    elif array.ndim > 2:
+                        array = array.reshape(array.shape[0], -1)
+                    new_df = pd.DataFrame(
+                        array, columns=[f"col_{i+1}" for i in range(array.shape[1])]
+                    )
             else:
-                var_choice = st.selectbox("Select MATLAB variable to import", mat_vars)
-                array = np.asarray(mat_dict[var_choice])
-                if array.ndim == 1:
-                    array = array.reshape(-1, 1)
-                elif array.ndim > 2:
-                    array = array.reshape(array.shape[0], -1)
-                new_df = pd.DataFrame(
-                    array, columns=[f"col_{i+1}" for i in range(array.shape[1])]
-                )
-        else:
-            new_df = None
+                new_df = None
 
-        if new_df is not None:
-            st.session_state.df = new_df
-            st.session_state.feature_cols = []
-            st.session_state.label_col = None
-            st.session_state.normalized_df = None
-            st.session_state.normalization_scaler = None
-            st.session_state.use_normalized_downstream = False
+            if new_df is not None:
+                st.session_state.df = new_df
+                st.session_state.original_df = new_df.copy()
+                st.session_state.data_source_id = source_id
+                st.session_state.feature_cols = []
+                st.session_state.label_col = None
+                st.session_state.encoding_history = []
+                st.session_state.variable_roles = initialize_variable_roles(new_df)
+                st.session_state.processing_log = []
+                clear_derived_artifacts()
 
-    except Exception as e:
-        st.error(f"Failed to load file: {e}")
+        except Exception as e:
+            st.error(f"Failed to load file: {e}")
 
 df = st.session_state.df
 
@@ -439,6 +534,48 @@ if df is not None:
     with st.expander("Column Data-Type and Quality Summary", expanded=False):
         st.dataframe(dtype_summary)
 
+    st.subheader("Automated Variable-Role Recommendations")
+    st.caption(
+        "Review and correct the suggested analytical roles before preprocessing. "
+        "Storage dtype and machine-learning role are not always the same."
+    )
+    if not st.session_state.variable_roles or set(st.session_state.variable_roles) != set(all_cols):
+        st.session_state.variable_roles = initialize_variable_roles(df)
+    role_table = pd.DataFrame({
+        "Column": all_cols,
+        "Storage Type": [str(df[c].dtype) for c in all_cols],
+        "Unique Values": [int(df[c].nunique(dropna=True)) for c in all_cols],
+        "Missing Values": [int(df[c].isna().sum()) for c in all_cols],
+        "Assigned Role": [st.session_state.variable_roles.get(c, infer_variable_role(df, c)) for c in all_cols],
+    })
+    edited_roles = st.data_editor(
+        role_table,
+        hide_index=True,
+        use_container_width=True,
+        disabled=["Column", "Storage Type", "Unique Values", "Missing Values"],
+        column_config={
+            "Assigned Role": st.column_config.SelectboxColumn(
+                "Assigned Role", options=ROLE_OPTIONS, required=True
+            )
+        },
+        key="variable_role_editor",
+    )
+    if st.button("Apply Variable Roles", type="primary", key="apply_variable_roles"):
+        roles = dict(zip(edited_roles["Column"], edited_roles["Assigned Role"]))
+        targets = [column for column, role in roles.items() if role == "Target"]
+        if len(targets) > 1:
+            st.error("Assign only one target column for the current analysis workflow.")
+        else:
+            st.session_state.variable_roles = roles
+            st.session_state.label_col = targets[0] if targets else None
+            st.session_state.feature_cols = [
+                column for column, role in roles.items()
+                if role in {"Numerical Feature", "Categorical Feature", "Ordinal Feature"}
+            ]
+            log_processing("Variable roles assigned", {"roles": roles})
+            st.success("Analytical variable roles applied.")
+            st.rerun()
+
     missing_overview = missing_value_counts(df)
     missing_overview = missing_overview[missing_overview > 0]
     if missing_overview.empty:
@@ -460,7 +597,14 @@ if df is not None:
     st.subheader("Define Variables, Labels, and Channels")
     c1, c2 = st.columns(2)
     current_label = st.session_state.label_col if st.session_state.label_col in all_cols else None
-    default_feature_cols = numeric_feature_columns(df, current_label)
+    role_default_features = [
+        c for c in all_cols
+        if st.session_state.variable_roles.get(c) in {
+            "Numerical Feature", "Categorical Feature", "Ordinal Feature"
+        }
+        and c != current_label
+    ]
+    default_feature_cols = role_default_features or numeric_feature_columns(df, current_label)
 
     with c1:
         selected_feature_cols = st.multiselect(
@@ -522,6 +666,31 @@ _tab_context.__enter__()
 st.header("Data Preprocessing")
 
 if df is not None:
+    if st.button("Reset to Original Uploaded Dataset", key="reset_original_data"):
+        if st.session_state.original_df is not None:
+            st.session_state.df = st.session_state.original_df.copy()
+            st.session_state.feature_cols = []
+            st.session_state.label_col = None
+            st.session_state.encoding_history = []
+            st.session_state.variable_roles = initialize_variable_roles(st.session_state.df)
+            st.session_state.processing_log = []
+            clear_derived_artifacts()
+            st.success("The original uploaded dataset has been restored.")
+            st.rerun()
+
+    excluded_columns = roles_for("Excluded", df)
+    if excluded_columns:
+        st.warning("Columns assigned as Excluded: " + ", ".join(excluded_columns))
+        if st.button("Drop Excluded Columns", key="drop_excluded_columns"):
+            df = df.drop(columns=excluded_columns)
+            st.session_state.df = df
+            for column in excluded_columns:
+                st.session_state.variable_roles.pop(column, None)
+            clear_derived_artifacts()
+            log_processing("Excluded columns dropped", {"columns": excluded_columns})
+            st.success("Excluded columns removed from the working dataset.")
+            st.rerun()
+
     numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
     numeric_signal_cols = numeric_feature_columns(df, st.session_state.label_col)
 
@@ -542,50 +711,366 @@ if df is not None:
             st.success("Duplicate rows removed from the in-session dataset.")
             st.dataframe(df.head())
 
-    st.subheader("Missing Value Check")
-    missing_summary = df.isnull().sum()
+    st.subheader("Variable-Type Conversion")
+    st.caption(
+        "Assign the analytical type explicitly. For example, Titanic Pclass and "
+        "Survived may be treated as categorical even though they are stored as integers."
+    )
+    type_col1, type_col2 = st.columns(2)
+    with type_col1:
+        type_column = st.selectbox(
+            "Variable to convert", df.columns.tolist(), key="dtype_column"
+        )
+    with type_col2:
+        target_type = st.selectbox(
+            "New variable type",
+            ["Numeric", "Categorical", "Text", "Boolean", "Datetime"],
+            key="dtype_target",
+        )
+    st.caption(f"Current type: {df[type_column].dtype}")
+    if st.button("Apply Type Conversion", key="apply_dtype"):
+        before_missing = int(df[type_column].isna().sum())
+        converted = convert_column_type(df[type_column], target_type)
+        after_missing = int(converted.isna().sum())
+        df = df.copy()
+        df[type_column] = converted
+        st.session_state.df = df
+        clear_derived_artifacts()
+        role_map = {
+            "Numeric": "Numerical Feature", "Categorical": "Categorical Feature",
+            "Text": "Free Text", "Datetime": "Datetime",
+            "Boolean": "Categorical Feature",
+        }
+        st.session_state.variable_roles[type_column] = role_map[target_type]
+        log_processing("Variable type converted", {"column": type_column, "type": target_type})
+        if after_missing > before_missing:
+            st.warning(
+                f"Conversion introduced {after_missing - before_missing} missing value(s) "
+                "because some values could not be converted."
+            )
+        st.success(f"{type_column} converted to {target_type}.")
+        st.rerun()
+
+    st.subheader("Separate Missing-Value Imputation")
+    numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+    categorical_cols = df.select_dtypes(
+        include=["object", "category", "string", "bool", "boolean"]
+    ).columns.tolist()
+    numeric_missing = [c for c in numeric_cols if df[c].isna().any()]
+    categorical_missing = [c for c in categorical_cols if df[c].isna().any()]
+
+    missing_summary = df.isna().sum()
     missing_summary = missing_summary[missing_summary > 0]
     if missing_summary.empty:
         st.success("No missing values detected.")
     else:
-        st.warning("Missing values detected:")
-        st.dataframe(missing_summary.rename("missing_count"))
+        st.dataframe(missing_summary.rename("Missing Values"), use_container_width=True)
 
-        fill_strategy = st.selectbox(
-            "Missing Value Handling Strategy",
-            ["Do nothing", "Drop rows with missing values", "Fill with mean",
-             "Fill with median", "Fill with mode", "Fill with zero", "Forward fill"]
+    imp_left, imp_right = st.columns(2)
+    with imp_left:
+        st.markdown("**Numeric features**")
+        selected_numeric_impute = st.multiselect(
+            "Numeric columns to impute",
+            numeric_cols,
+            default=numeric_missing,
+            key="numeric_impute_columns",
         )
-        if st.button("Apply Missing Value Handling"):
-            if fill_strategy == "Drop rows with missing values":
-                df = df.dropna()
-            elif fill_strategy == "Fill with mean":
-                if numeric_cols:
-                    df[numeric_cols] = df[numeric_cols].fillna(df[numeric_cols].mean())
-                else:
-                    st.warning("No numeric columns are available for mean imputation.")
-            elif fill_strategy == "Fill with median":
-                if numeric_cols:
-                    df[numeric_cols] = df[numeric_cols].fillna(df[numeric_cols].median())
-                else:
-                    st.warning("No numeric columns are available for median imputation.")
-            elif fill_strategy == "Fill with mode":
-                df, skipped_mode_cols = fill_missing_with_mode(df)
-                if skipped_mode_cols:
-                    st.warning("Mode imputation skipped all-missing column(s): " + ", ".join(skipped_mode_cols))
-            elif fill_strategy == "Fill with zero":
-                df = df.fillna(0)
-            elif fill_strategy == "Forward fill":
+        numeric_strategy = st.selectbox(
+            "Numeric imputation strategy",
+            ["Median", "Mean", "Mode", "Zero"],
+            key="numeric_impute_strategy",
+        )
+    with imp_right:
+        st.markdown("**Categorical features**")
+        selected_categorical_impute = st.multiselect(
+            "Categorical columns to impute",
+            categorical_cols,
+            default=categorical_missing,
+            key="categorical_impute_columns",
+        )
+        categorical_strategy = st.selectbox(
+            "Categorical imputation strategy",
+            ["Most frequent (mode)", "Constant value"],
+            key="categorical_impute_strategy",
+        )
+        categorical_constant = None
+        if categorical_strategy == "Constant value":
+            categorical_constant = st.text_input(
+                "Replacement category", value="Missing", key="categorical_fill_value"
+            )
+
+    if st.button("Apply Selected Imputation", type="primary", key="apply_imputation"):
+        df = df.copy()
+        for column in selected_numeric_impute:
+            if numeric_strategy == "Median":
+                fill_value = df[column].median()
+            elif numeric_strategy == "Mean":
+                fill_value = df[column].mean()
+            elif numeric_strategy == "Mode":
+                fill_value = safe_mode(df[column])
+            else:
+                fill_value = 0
+            if pd.notna(fill_value):
+                df[column] = df[column].fillna(fill_value)
+
+        for column in selected_categorical_impute:
+            fill_value = (
+                safe_mode(df[column])
+                if categorical_strategy == "Most frequent (mode)"
+                else categorical_constant
+            )
+            if fill_value is not None:
+                if isinstance(df[column].dtype, pd.CategoricalDtype) and fill_value not in df[column].cat.categories:
+                    df[column] = df[column].cat.add_categories([fill_value])
+                df[column] = df[column].fillna(fill_value)
+
+        st.session_state.df = df
+        clear_derived_artifacts()
+        log_processing(
+            "Missing values imputed",
+            {
+                "numeric_columns": selected_numeric_impute,
+                "numeric_strategy": numeric_strategy,
+                "categorical_columns": selected_categorical_impute,
+                "categorical_strategy": categorical_strategy,
+            },
+        )
+        st.success("Selected numeric and categorical imputation completed.")
+        st.rerun()
+
+    with st.expander("Optional row-level missing-value actions", expanded=False):
+        row_action = st.selectbox(
+            "Row action", ["None", "Drop rows containing any missing value", "Forward fill"],
+            key="row_missing_action",
+        )
+        if st.button("Apply Row Action", key="apply_row_action"):
+            if row_action == "Drop rows containing any missing value":
+                df = df.dropna().reset_index(drop=True)
+            elif row_action == "Forward fill":
                 df = df.ffill()
-            elif fill_strategy == "Do nothing":
-                st.info("No missing-value changes were applied.")
             st.session_state.df = df
-            if fill_strategy != "Do nothing":
-                st.session_state.normalized_df = None
-                st.session_state.normalization_scaler = None
-                st.session_state.use_normalized_downstream = False
-                st.success("Missing value handling applied.")
-                st.dataframe(df.head())
+            clear_derived_artifacts()
+            st.success("Row-level action applied.")
+            st.rerun()
+
+    st.subheader("Text and Datetime Preparation")
+    text_candidates = [
+        c for c in df.columns
+        if st.session_state.variable_roles.get(c) == "Free Text"
+        or pd.api.types.is_object_dtype(df[c])
+        or pd.api.types.is_string_dtype(df[c])
+    ]
+    text_columns = st.multiselect(
+        "Text columns to clean", text_candidates, key="text_clean_columns"
+    )
+    text_action = st.selectbox(
+        "Text cleaning action",
+        ["Trim whitespace", "Lowercase", "Uppercase", "Title case", "Empty strings to missing"],
+        key="text_clean_action",
+    )
+    if st.button("Apply Text Cleaning", key="apply_text_cleaning"):
+        df = df.copy()
+        for column in text_columns:
+            text_series = df[column].astype("string")
+            if text_action == "Trim whitespace":
+                df[column] = text_series.str.strip()
+            elif text_action == "Lowercase":
+                df[column] = text_series.str.lower()
+            elif text_action == "Uppercase":
+                df[column] = text_series.str.upper()
+            elif text_action == "Title case":
+                df[column] = text_series.str.title()
+            else:
+                df[column] = text_series.replace(r"^\s*$", pd.NA, regex=True)
+        st.session_state.df = df
+        clear_derived_artifacts()
+        log_processing("Text cleaning applied", {"columns": text_columns, "action": text_action})
+        st.success("Text cleaning completed.")
+        st.rerun()
+
+    datetime_candidates = list(dict.fromkeys(
+        roles_for("Datetime", df)
+        + [c for c in df.columns if pd.api.types.is_datetime64_any_dtype(df[c])]
+    ))
+    datetime_columns = st.multiselect(
+        "Datetime columns to parse", datetime_candidates, key="datetime_columns"
+    )
+    datetime_parts = st.multiselect(
+        "Datetime components to extract",
+        ["Year", "Month", "Day", "Day of week", "Hour"],
+        default=["Year", "Month", "Day of week"],
+        key="datetime_parts",
+    )
+    keep_original_datetime = st.checkbox(
+        "Keep original datetime column", value=True, key="keep_datetime"
+    )
+    if st.button("Parse and Extract Datetime Features", key="apply_datetime"):
+        df = df.copy()
+        for column in datetime_columns:
+            parsed = pd.to_datetime(df[column], errors="coerce")
+            suffix_map = {
+                "Year": ("year", parsed.dt.year),
+                "Month": ("month", parsed.dt.month),
+                "Day": ("day", parsed.dt.day),
+                "Day of week": ("dayofweek", parsed.dt.dayofweek),
+                "Hour": ("hour", parsed.dt.hour),
+            }
+            for part in datetime_parts:
+                suffix, values = suffix_map[part]
+                new_column = f"{column}_{suffix}"
+                df[new_column] = values
+                st.session_state.variable_roles[new_column] = "Numerical Feature"
+            if keep_original_datetime:
+                df[column] = parsed
+            else:
+                df = df.drop(columns=[column])
+                st.session_state.variable_roles.pop(column, None)
+        st.session_state.df = df
+        clear_derived_artifacts()
+        log_processing(
+            "Datetime features extracted",
+            {"columns": datetime_columns, "parts": datetime_parts},
+        )
+        st.success("Datetime processing completed.")
+        st.rerun()
+
+    st.subheader("Categorical Encoding")
+    categorical_cols = df.select_dtypes(
+        include=["object", "category", "string", "bool", "boolean"]
+    ).columns.tolist()
+    label_col = st.session_state.label_col
+    encoding_candidates = [c for c in categorical_cols if c != label_col]
+    recommended_encoding = [
+        c for c in encoding_candidates if 1 < df[c].nunique(dropna=True) <= 20
+    ]
+    high_cardinality = [c for c in encoding_candidates if df[c].nunique(dropna=True) > 20]
+    if high_cardinality:
+        st.warning(
+            "High-cardinality columns are not selected automatically: "
+            + ", ".join(high_cardinality)
+            + ". Encoding them may create many new columns."
+        )
+
+    binary_candidates = [
+        c for c in encoding_candidates if df[c].nunique(dropna=True) == 2
+    ]
+    binary_columns = st.multiselect(
+        "Binary categorical columns to encode as 0 and 1",
+        binary_candidates,
+        key="binary_encode_columns",
+    )
+    if st.button("Apply Binary Encoding", key="apply_binary_encoding"):
+        if not binary_columns:
+            st.warning("Select at least one binary categorical column.")
+        else:
+            df = df.copy()
+            mappings = {}
+            for column in binary_columns:
+                categories = sorted(df[column].dropna().astype(str).unique().tolist())
+                mapping = {categories[0]: 0, categories[1]: 1}
+                df[column] = df[column].astype("string").map(mapping).astype("Int64")
+                mappings[column] = mapping
+                st.session_state.variable_roles[column] = "Numerical Feature"
+            st.session_state.df = df
+            clear_derived_artifacts()
+            log_processing("Binary encoding applied", {"mappings": mappings})
+            st.success("Binary encoding completed.")
+            st.rerun()
+
+    ordinal_candidates = [
+        c for c in encoding_candidates
+        if st.session_state.variable_roles.get(c) == "Ordinal Feature"
+    ]
+    ordinal_column = st.selectbox(
+        "Ordinal column", ["None"] + ordinal_candidates, key="ordinal_column"
+    )
+    ordinal_order = st.text_input(
+        "Ordered categories, comma separated (lowest to highest)",
+        key="ordinal_order",
+    )
+    if st.button("Apply Ordinal Encoding", key="apply_ordinal_encoding"):
+        if ordinal_column == "None":
+            st.warning("Assign and select an ordinal feature first.")
+        else:
+            ordered_categories = [item.strip() for item in ordinal_order.split(",") if item.strip()]
+            observed = set(df[ordinal_column].dropna().astype(str).unique())
+            if not ordered_categories or not observed.issubset(set(ordered_categories)):
+                st.error("The entered order must include every observed category.")
+            else:
+                mapping = {category: index for index, category in enumerate(ordered_categories)}
+                df = df.copy()
+                df[ordinal_column] = df[ordinal_column].astype("string").map(mapping).astype("Int64")
+                st.session_state.df = df
+                st.session_state.variable_roles[ordinal_column] = "Numerical Feature"
+                clear_derived_artifacts()
+                log_processing(
+                    "Ordinal encoding applied",
+                    {"column": ordinal_column, "mapping": mapping},
+                )
+                st.success("Ordinal encoding completed.")
+                st.rerun()
+    columns_to_encode = st.multiselect(
+        "Categorical columns for one-hot encoding",
+        encoding_candidates,
+        default=recommended_encoding,
+        key="one_hot_columns",
+    )
+    enc_col1, enc_col2 = st.columns(2)
+    with enc_col1:
+        drop_first = st.checkbox(
+            "Drop first category", value=False,
+            help="Useful for linear models to reduce redundant dummy columns.",
+        )
+    with enc_col2:
+        include_missing_category = st.checkbox(
+            "Create a missing-category indicator", value=False,
+            help="Prefer imputing missing categories first unless missingness itself is informative.",
+        )
+
+    if st.button("Apply One-Hot Encoding", type="primary", key="apply_one_hot"):
+        if not columns_to_encode:
+            st.warning("Select at least one categorical column to encode.")
+        else:
+            missing_encode_cols = [c for c in columns_to_encode if df[c].isna().any()]
+            if missing_encode_cols and not include_missing_category:
+                st.error(
+                    "Impute missing categorical values first or enable the missing-category "
+                    "indicator for: " + ", ".join(missing_encode_cols)
+                )
+            else:
+                before_count = df.shape[1]
+                encoded_df = pd.get_dummies(
+                    df,
+                    columns=columns_to_encode,
+                    drop_first=drop_first,
+                    dummy_na=include_missing_category,
+                    dtype=int,
+                )
+                st.session_state.df = encoded_df
+                st.session_state.encoding_history = (
+                    st.session_state.encoding_history + columns_to_encode
+                )
+                new_roles = {
+                    column: role for column, role in st.session_state.variable_roles.items()
+                    if column in encoded_df.columns
+                }
+                for column in encoded_df.columns:
+                    if column not in new_roles:
+                        new_roles[column] = "Numerical Feature"
+                st.session_state.variable_roles = new_roles
+                clear_derived_artifacts()
+                log_processing(
+                    "One-hot encoding applied",
+                    {"columns": columns_to_encode, "drop_first": drop_first},
+                )
+                st.success(
+                    f"One-hot encoding completed. Columns changed from {before_count} "
+                    f"to {encoded_df.shape[1]}."
+                )
+                st.rerun()
+
+    st.subheader("Preprocessed Dataset Preview")
+    st.dataframe(df.head(20), use_container_width=True)
 
     st.caption("Scaling is handled independently in Tab 3 so the cleaned dataset remains unchanged.")
 
@@ -672,6 +1157,10 @@ else:
                     st.session_state.normalized_df = normalized_df
                     st.session_state.normalization_scaler = scaler
                     st.session_state.normalization_method = scaling_method
+                    log_processing(
+                        "Feature normalization applied",
+                        {"columns": scale_ready_cols, "method": scaling_method},
+                    )
                     st.success(
                         f"{len(scale_ready_cols)} feature(s) transformed using "
                         f"{scaling_method}."
@@ -714,54 +1203,127 @@ _tab_context.__exit__(None, None, None)
 _tab_context = page_tabs[3]
 _tab_context.__enter__()
 
-# 3.1.2 / 3.1.3 FEATURE EXTRACTION & WINDOWING
+# GENERAL TABULAR OR TIME-SERIES FEATURE ENGINEERING
 # =========================================================
-st.header("Feature Extraction (Statistical Features & Windowing)")
+st.header("Feature Engineering and Extraction")
+engineering_mode = st.radio(
+    "Feature-engineering mode",
+    ["General Tabular Data", "Time-Series / Sensor Windowing"],
+    horizontal=True,
+    key="engineering_mode",
+)
 
-if df is not None and channels:
-    window_size = st.number_input("Window Size", min_value=1, value=50)
-    overlap = st.slider("Overlap Percentage", 0, 90, 50)
+if df is None:
+    st.info("Upload a dataset before engineering features.")
+elif engineering_mode == "General Tabular Data":
+    tabular_numeric = [
+        c for c in df.select_dtypes(include=[np.number]).columns
+        if c != st.session_state.label_col and not is_metadata_column(c)
+    ]
+    tabular_categorical = [
+        c for c in df.select_dtypes(include=["object", "category", "string", "bool", "boolean"]).columns
+        if c != st.session_state.label_col
+    ]
+    eng_left, eng_right = st.columns(2)
+    with eng_left:
+        bin_columns = st.multiselect("Numerical columns to bin", tabular_numeric, key="bin_columns")
+        bin_count = st.slider("Number of equal-frequency bins", 2, 10, 4)
+        frequency_columns = st.multiselect(
+            "Categorical columns for frequency encoding", tabular_categorical,
+            key="frequency_columns",
+        )
+    with eng_right:
+        first_numeric = st.selectbox(
+            "First numerical feature", ["None"] + tabular_numeric, key="interaction_first"
+        )
+        second_numeric = st.selectbox(
+            "Second numerical feature",
+            ["None"] + [c for c in tabular_numeric if c != first_numeric],
+            key="interaction_second",
+        )
+        interaction_types = st.multiselect(
+            "Interaction features", ["Sum", "Difference", "Product", "Ratio"],
+            key="interaction_types",
+        )
 
-    if st.button("Extract Statistical Features"):
-        if len(df) < window_size:
-            st.warning("Window size is larger than the dataset, so no feature windows can be extracted.")
-        else:
-            step = max(1, int(window_size * (1 - overlap / 100)))
-            features = []
+    if st.button("Create Tabular Features", type="primary", key="create_tabular_features"):
+        engineered = df.copy()
+        created = []
+        for column in bin_columns:
+            new_column = f"{column}_bin"
+            try:
+                engineered[new_column] = pd.qcut(
+                    engineered[column], q=bin_count, duplicates="drop"
+                ).astype("string")
+                created.append(new_column)
+            except ValueError:
+                st.warning(f"{column} could not be binned because it lacks enough distinct values.")
+        for column in frequency_columns:
+            new_column = f"{column}_frequency"
+            frequencies = engineered[column].value_counts(dropna=False, normalize=True)
+            engineered[new_column] = engineered[column].map(frequencies)
+            created.append(new_column)
+        if first_numeric != "None" and second_numeric != "None":
+            operations = {
+                "Sum": ("sum", engineered[first_numeric] + engineered[second_numeric]),
+                "Difference": ("difference", engineered[first_numeric] - engineered[second_numeric]),
+                "Product": ("product", engineered[first_numeric] * engineered[second_numeric]),
+                "Ratio": ("ratio", engineered[first_numeric].div(engineered[second_numeric].replace(0, np.nan))),
+            }
+            for operation in interaction_types:
+                suffix, values = operations[operation]
+                new_column = f"{first_numeric}_{second_numeric}_{suffix}"
+                engineered[new_column] = values
+                created.append(new_column)
+        st.session_state.tabular_engineered_df = engineered
+        st.session_state.engineered_df = engineered
+        log_processing("Tabular features engineered", {"created_columns": created})
+        st.success(f"Created {len(created)} new tabular feature(s).")
 
-            # Each window gets summary statistics for selected numeric signals;
-            # labels are summarized separately so they do not become features.
-            for start in range(0, len(df) - window_size + 1, step):
-                window = df.iloc[start:start + window_size]
-                stats = {"start_idx": start, "end_idx": start + window_size - 1}
-
-                if st.session_state.label_col and st.session_state.label_col in window.columns:
-                    label_window = window[st.session_state.label_col]
-                    stats["label"] = safe_mode(label_window)
-
-                for col in channels:
-                    series = pd.to_numeric(window[col], errors="coerce")
-                    stats[f"{col}_mean"] = series.mean()
-                    stats[f"{col}_median"] = series.median()
-                    stats[f"{col}_max"] = series.max()
-                    stats[f"{col}_min"] = series.min()
-                    stats[f"{col}_p2p"] = series.max() - series.min()
-                    stats[f"{col}_var"] = series.var()
-                    stats[f"{col}_std"] = series.std()
-                    stats[f"{col}_rms"] = np.sqrt(np.mean(series.dropna() ** 2)) if series.notna().any() else np.nan
-                    stats[f"{col}_skew"] = series.skew()
-                    stats[f"{col}_kurt"] = series.kurt()
-
-                features.append(stats)
-
-            feat_df = pd.DataFrame(features)
-            st.session_state.engineered_df = feat_df
-            st.success(f"Feature Set Extracted - Shape: {feat_df.shape}")
-
-if st.session_state.engineered_df is not None:
-    st.dataframe(st.session_state.engineered_df.head())
-elif df is not None and not channels:
-    st.info("Select at least one channel/signal above to extract features.")
+    if st.session_state.tabular_engineered_df is not None:
+        st.dataframe(st.session_state.tabular_engineered_df.head(20), use_container_width=True)
+        st.download_button(
+            "Download Tabular Engineered Dataset",
+            to_csv_bytes(st.session_state.tabular_engineered_df),
+            file_name="tabular_engineered_dataset.csv",
+            mime="text/csv",
+        )
+else:
+    if not channels:
+        st.info("Select numeric channels/signals in Data Import first.")
+    else:
+        window_size = st.number_input("Window Size", min_value=1, value=50)
+        overlap = st.slider("Overlap Percentage", 0, 90, 50)
+        if st.button("Extract Statistical Features"):
+            if len(df) < window_size:
+                st.warning("Window size is larger than the dataset.")
+            else:
+                step = max(1, int(window_size * (1 - overlap / 100)))
+                features = []
+                for start in range(0, len(df) - window_size + 1, step):
+                    window = df.iloc[start:start + window_size]
+                    stats = {"start_idx": start, "end_idx": start + window_size - 1}
+                    if st.session_state.label_col and st.session_state.label_col in window.columns:
+                        stats["label"] = safe_mode(window[st.session_state.label_col])
+                    for column in channels:
+                        series = pd.to_numeric(window[column], errors="coerce")
+                        stats.update({
+                            f"{column}_mean": series.mean(), f"{column}_median": series.median(),
+                            f"{column}_max": series.max(), f"{column}_min": series.min(),
+                            f"{column}_p2p": series.max() - series.min(), f"{column}_var": series.var(),
+                            f"{column}_std": series.std(),
+                            f"{column}_rms": np.sqrt(np.mean(series.dropna() ** 2)) if series.notna().any() else np.nan,
+                            f"{column}_skew": series.skew(), f"{column}_kurt": series.kurt(),
+                        })
+                    features.append(stats)
+                st.session_state.engineered_df = pd.DataFrame(features)
+                log_processing(
+                    "Time-series statistical features extracted",
+                    {"window_size": window_size, "overlap": overlap},
+                )
+                st.success(f"Feature set extracted: {st.session_state.engineered_df.shape}")
+        if st.session_state.engineered_df is not None:
+            st.dataframe(st.session_state.engineered_df.head(), use_container_width=True)
 
 st.markdown("---")
 
@@ -772,12 +1334,52 @@ _tab_context.__enter__()
 
 # 3.1.4 FEATURE SELECTION AND MANAGEMENT
 # =========================================================
-st.header("3.1.4 Feature Selection and Management")
+st.header("Feature Selection and Management")
 
 if st.session_state.engineered_df is not None:
     feat_df = st.session_state.engineered_df
-    non_feature_cols = [c for c in ["start_idx", "end_idx", "label"] if c in feat_df.columns]
-    stat_cols = [c for c in feat_df.columns if c not in non_feature_cols]
+    protected_names = ["start_idx", "end_idx", "label", st.session_state.label_col]
+    protected_names += roles_for("Identifier", feat_df)
+    non_feature_cols = list(dict.fromkeys([c for c in protected_names if c in feat_df.columns]))
+    stat_cols = [
+        c for c in feat_df.columns
+        if c not in non_feature_cols
+        and st.session_state.variable_roles.get(c, "Numerical Feature") != "Excluded"
+    ]
+
+    st.subheader("Automated Feature Filtering")
+    filter_numeric = feat_df[stat_cols].select_dtypes(include=[np.number]).columns.tolist()
+    near_constant_threshold = st.slider(
+        "Near-constant dominance threshold", 0.90, 1.00, 0.995, 0.005,
+        help="Features where one value occupies at least this share are removed.",
+    )
+    correlation_threshold = st.slider(
+        "High-correlation threshold", 0.70, 1.00, 0.95, 0.01,
+        help="From each highly correlated numeric pair, the later feature is removed.",
+    )
+    if st.button("Apply Automated Feature Filtering", key="auto_feature_filter"):
+        constants = constant_columns(feat_df, filter_numeric)
+        near_constants = near_constant_columns(
+            feat_df, [c for c in filter_numeric if c not in constants], near_constant_threshold
+        )
+        candidates = [c for c in filter_numeric if c not in constants + near_constants]
+        correlated_drop = []
+        if len(candidates) > 1:
+            corr = feat_df[candidates].corr().abs()
+            upper = corr.where(np.triu(np.ones(corr.shape), k=1).astype(bool))
+            correlated_drop = [column for column in upper.columns if (upper[column] > correlation_threshold).any()]
+        drop_columns = list(dict.fromkeys(constants + near_constants + correlated_drop))
+        st.session_state.engineered_df = feat_df.drop(columns=drop_columns, errors="ignore")
+        log_processing(
+            "Automated feature filtering applied",
+            {
+                "constant_removed": constants,
+                "near_constant_removed": near_constants,
+                "correlated_removed": correlated_drop,
+            },
+        )
+        st.success(f"Removed {len(drop_columns)} feature(s).")
+        st.dataframe(st.session_state.engineered_df.head(), use_container_width=True)
 
     keep_cols = st.multiselect(
         "Add/Remove Features in Current Set", stat_cols, default=stat_cols
@@ -1376,7 +1978,7 @@ _tab_context.__enter__()
 # =========================================================
 st.header("Export Capability")
 
-export_options = ["Raw / Preprocessed Data", "Engineered Feature Set"]
+export_options = ["Original Uploaded Data", "Cleaned / Encoded Data", "Engineered Feature Set"]
 if st.session_state.normalized_df is not None:
     export_options.append("Normalized Dataset")
 if st.session_state.selected_important_df is not None:
@@ -1387,8 +1989,10 @@ export_target = st.radio(
     export_options,
     horizontal=True,
 )
-if export_target == "Raw / Preprocessed Data":
-    export_df = df
+if export_target == "Original Uploaded Data":
+    export_df = st.session_state.original_df
+elif export_target == "Cleaned / Encoded Data":
+    export_df = st.session_state.df
 elif export_target == "Engineered Feature Set":
     export_df = st.session_state.engineered_df
 elif export_target == "Normalized Dataset":
@@ -1419,5 +2023,26 @@ if export_df is not None:
         )
 else:
     st.info("Nothing available to export yet for this selection.")
+
+st.subheader("Processing Configuration and Audit Trail")
+configuration = {
+    "source_id": st.session_state.data_source_id,
+    "variable_roles": st.session_state.variable_roles,
+    "label_column": st.session_state.label_col,
+    "selected_feature_columns": st.session_state.feature_cols,
+    "encoded_source_columns": st.session_state.encoding_history,
+    "normalization_method": st.session_state.normalization_method,
+    "processing_log": st.session_state.processing_log,
+}
+if st.session_state.processing_log:
+    st.dataframe(pd.DataFrame(st.session_state.processing_log), use_container_width=True)
+else:
+    st.caption("No transformations have been applied yet.")
+st.download_button(
+    "Download Processing Configuration (JSON)",
+    data=json.dumps(configuration, indent=2, default=str).encode("utf-8"),
+    file_name="icaav_processing_configuration.json",
+    mime="application/json",
+)
 
 _tab_context.__exit__(None, None, None)
