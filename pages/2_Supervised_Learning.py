@@ -575,10 +575,9 @@ with tabs[1]:
         })
         st.dataframe(missing, use_container_width=True)
 
-        col1, col2, col3 = st.columns(3)
+        col1, col2 = st.columns(2)
         numeric_strategy = col1.selectbox("Numeric imputation", ["median", "mean", "most_frequent"], key=state_key("num_impute"))
         categorical_strategy = col2.selectbox("Categorical imputation", ["most_frequent", "constant"], key=state_key("cat_impute"))
-        scale_numeric = col3.checkbox("Standardize numeric features", value=True, key=state_key("scale"))
         drop_duplicates = st.checkbox("Remove duplicate rows before splitting", value=True, key=state_key("drop_duplicates"))
 
         preparation = {
@@ -586,7 +585,6 @@ with tabs[1]:
             "categorical_cols": categorical_cols,
             "numeric_strategy": numeric_strategy,
             "categorical_strategy": categorical_strategy,
-            "scale_numeric": scale_numeric,
             "drop_duplicates": drop_duplicates,
         }
         if st.session_state.get(state_key("preparation")) != preparation:
@@ -595,9 +593,9 @@ with tabs[1]:
                 st.session_state.pop(state_key(name), None)
 
         st.subheader("Automatic Pipeline Preview")
-        st.write(f"Numeric: impute with **{numeric_strategy}**" + (" and standardize." if scale_numeric else "."))
+        st.write(f"Numeric: impute with **{numeric_strategy}**.")
         st.write(f"Categorical: impute with **{categorical_strategy}** and one-hot encode unknown-safe categories.")
-        st.caption("The preprocessor is fitted only on training data to reduce leakage.")
+        st.caption("Standardization is configured after the train/test split in Step 3 to prevent data leakage.")
 
 
 # ---------------------------------------------------------------------------
@@ -611,6 +609,55 @@ with tabs[2]:
     if df is None or not setup or not preparation:
         st.info("Complete Steps 1 and 2 first.")
     else:
+        st.subheader("Optional Preprocessed Data Import")
+        split_source = st.radio(
+            "Choose the data source for the train/test split",
+            ["Use dataset prepared in Steps 1–2", "Import a preprocessed CSV"],
+            horizontal=True,
+            key=state_key("split_source"),
+        )
+        if st.session_state.get(state_key("active_split_source")) != split_source:
+            st.session_state[state_key("active_split_source")] = split_source
+            for name in ["split", "trained_bundle", "comparison", "cv_results", "tuned_bundle", "prediction"]:
+                st.session_state.pop(state_key(name), None)
+
+        split_df = df
+        preprocessed_ready = True
+        if split_source == "Import a preprocessed CSV":
+            preprocessed_upload = st.file_uploader(
+                "Upload preprocessed data (CSV)",
+                type=["csv"],
+                key=state_key("preprocessed_upload"),
+                help="The CSV must contain the target and feature columns selected in Step 1.",
+            )
+            if preprocessed_upload is None:
+                preprocessed_ready = False
+                st.info("Upload a preprocessed CSV to continue with the split.")
+            else:
+                try:
+                    split_df = pd.read_csv(preprocessed_upload)
+                    required_columns = setup["features"] + [setup["target"]]
+                    missing_columns = [column for column in required_columns if column not in split_df.columns]
+                    if missing_columns:
+                        preprocessed_ready = False
+                        st.error(
+                            "The preprocessed CSV is missing required columns: "
+                            + ", ".join(map(str, missing_columns))
+                        )
+                    else:
+                        source_id = f"{preprocessed_upload.name}:{preprocessed_upload.size}"
+                        if st.session_state.get(state_key("preprocessed_source_id")) != source_id:
+                            st.session_state[state_key("preprocessed_source_id")] = source_id
+                            for name in ["split", "trained_bundle", "comparison", "cv_results", "tuned_bundle", "prediction"]:
+                                st.session_state.pop(state_key(name), None)
+                        st.success(
+                            f"Preprocessed data loaded: {len(split_df):,} rows and {split_df.shape[1]:,} columns."
+                        )
+                        st.dataframe(split_df.head(10), use_container_width=True)
+                except Exception as exc:
+                    preprocessed_ready = False
+                    st.error(f"Could not read the preprocessed CSV file: {exc}")
+
         c1, c2 = st.columns(2)
         test_size = c1.slider("Test size (%)", 10, 40, 20, key=state_key("test_size")) / 100
         random_state = c2.number_input("Random state", min_value=0, value=42, step=1, key=state_key("random_state"))
@@ -621,14 +668,21 @@ with tabs[2]:
             key=state_key("stratify"),
         )
 
-        if st.button("Split the Dataset", type="primary", key=state_key("split_button")):
+        if st.button(
+            "Split the Dataset",
+            type="primary",
+            disabled=not preprocessed_ready,
+            key=state_key("split_button"),
+        ):
             try:
-                working = df[setup["features"] + [setup["target"]]].copy()
+                working = split_df[setup["features"] + [setup["target"]]].copy()
                 working = working.dropna(subset=[setup["target"]])
                 if preparation["drop_duplicates"]:
                     working = working.drop_duplicates()
                 X = working[setup["features"]]
                 y = working[setup["target"]]
+                numeric_cols = X.select_dtypes(include=[np.number, "bool"]).columns.tolist()
+                categorical_cols = [column for column in setup["features"] if column not in numeric_cols]
                 stratify_values = None
                 if setup["problem_type"] == "Classification" and stratify and y.value_counts().min() >= 2:
                     stratify_values = y
@@ -637,6 +691,10 @@ with tabs[2]:
                 )
                 split = {
                     **setup, **preparation,
+                    "numeric_cols": numeric_cols,
+                    "categorical_cols": categorical_cols,
+                    "scale_numeric": bool(st.session_state.get(state_key("scale_after_split"), True)),
+                    "data_source": split_source,
                     "X_train": X_train, "X_test": X_test,
                     "y_train": y_train, "y_test": y_test,
                     "test_size": test_size, "random_state": int(random_state),
@@ -661,6 +719,23 @@ with tabs[2]:
                      split["y_test"].value_counts(normalize=True).rename("Test share")], axis=1
                 ).fillna(0)
                 st.dataframe(counts, use_container_width=True)
+
+            st.subheader("Post-Split Standardization")
+            scale_numeric = st.checkbox(
+                "Standardize numeric features using training data only",
+                value=split.get("scale_numeric", True),
+                key=state_key("scale_after_split"),
+                help="StandardScaler is fitted on X_train and then applied to X_test through the model pipeline.",
+            )
+            if split.get("scale_numeric") != scale_numeric:
+                split["scale_numeric"] = scale_numeric
+                st.session_state[state_key("split")] = split
+                for name in ["trained_bundle", "comparison", "cv_results", "tuned_bundle", "prediction"]:
+                    st.session_state.pop(state_key(name), None)
+            if scale_numeric:
+                st.success("Numeric standardization will be fitted on the training set only.")
+            else:
+                st.info("Numeric standardization is disabled for this split.")
 
 
 # ---------------------------------------------------------------------------
