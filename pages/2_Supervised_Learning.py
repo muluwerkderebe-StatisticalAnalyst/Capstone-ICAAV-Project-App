@@ -482,8 +482,25 @@ tabs = st.tabs(
 # 1. Data Import & Explore
 # ---------------------------------------------------------------------------
 with tabs[0]:
-    
-    uploaded = st.file_uploader("Upload a supervised-learning dataset (CSV)", type=["csv"], key=state_key("upload"))
+    data_mode = st.radio(
+        "Choose the dataset type",
+        ["Raw data", "Preprocessed data"],
+        horizontal=True,
+        key=state_key("data_mode"),
+        help="Preprocessed data skips Step 2 and continues directly to the train/test split in Step 3.",
+    )
+    if st.session_state.get(state_key("active_data_mode")) != data_mode:
+        st.session_state[state_key("active_data_mode")] = data_mode
+        for name in ["df", "source_id", "setup", "preparation", "split", "trained_bundle",
+                     "comparison", "cv_results", "tuned_bundle", "loaded_bundle", "prediction"]:
+            st.session_state.pop(state_key(name), None)
+
+    upload_label = (
+        "Upload a raw supervised-learning dataset (CSV)"
+        if data_mode == "Raw data"
+        else "Upload a preprocessed supervised-learning dataset (CSV)"
+    )
+    uploaded = st.file_uploader(upload_label, type=["csv"], key=state_key("upload"))
 
     if uploaded is not None:
         source_id = f"{uploaded.name}:{uploaded.size}"
@@ -492,6 +509,7 @@ with tabs[0]:
                 df = pd.read_csv(uploaded)
                 st.session_state[state_key("df")] = df
                 st.session_state[state_key("source_id")] = source_id
+                st.session_state[state_key("data_mode_selected")] = data_mode
                 reset_downstream()
             except Exception as exc:
                 st.error(f"Could not read the CSV file: {exc}")
@@ -547,6 +565,8 @@ with tabs[0]:
             st.error("Regression requires a numeric target column.")
         else:
             st.success(f"Configured {problem.lower()} with {len(features)} feature(s).")
+            if data_mode == "Preprocessed data":
+                st.info("Preprocessed data selected: Step 2 will be skipped. Open Step 3 to create the train/test split.")
 
 
 # ---------------------------------------------------------------------------
@@ -558,6 +578,28 @@ with tabs[1]:
     setup = st.session_state.get(state_key("setup"))
     if df is None or not setup or not setup["features"]:
         st.info("Complete Step 1 first.")
+    elif st.session_state.get(state_key("data_mode_selected")) == "Preprocessed data":
+        selected = df[setup["features"]]
+        numeric_cols = selected.select_dtypes(include=[np.number, "bool"]).columns.tolist()
+        categorical_cols = [column for column in setup["features"] if column not in numeric_cols]
+        preparation = {
+            "numeric_cols": numeric_cols,
+            "categorical_cols": categorical_cols,
+            "numeric_strategy": "median",
+            "categorical_strategy": "most_frequent",
+            "drop_duplicates": False,
+        }
+        if st.session_state.get(state_key("preparation")) != preparation:
+            st.session_state[state_key("preparation")] = preparation
+            for name in ["split", "trained_bundle", "comparison", "cv_results", "tuned_bundle", "prediction"]:
+                st.session_state.pop(state_key(name), None)
+        st.success("Step 2 skipped because the uploaded dataset is already preprocessed.")
+        st.write("Continue directly to **Step 3: Train / Test Split**.")
+        c1, c2 = st.columns(2)
+        c1.metric("Numeric features", len(numeric_cols))
+        c2.metric("Remaining categorical features", len(categorical_cols))
+        if categorical_cols:
+            st.caption("Any remaining categorical columns will still be encoded safely inside the model pipeline.")
     else:
         selected = df[setup["features"]]
         numeric_cols = selected.select_dtypes(include=[np.number, "bool"]).columns.tolist()
@@ -607,57 +649,11 @@ with tabs[2]:
     setup = st.session_state.get(state_key("setup"))
     preparation = st.session_state.get(state_key("preparation"))
     if df is None or not setup or not preparation:
-        st.info("Complete Steps 1 and 2 first.")
+        st.info("Complete Step 1 first. Raw data also requires Step 2; preprocessed data skips Step 2.")
     else:
-        st.subheader("Optional Preprocessed Data Import")
-        split_source = st.radio(
-            "Choose the data source for the train/test split",
-            ["Use dataset prepared in Steps 1–2", "Import a preprocessed CSV"],
-            horizontal=True,
-            key=state_key("split_source"),
-        )
-        if st.session_state.get(state_key("active_split_source")) != split_source:
-            st.session_state[state_key("active_split_source")] = split_source
-            for name in ["split", "trained_bundle", "comparison", "cv_results", "tuned_bundle", "prediction"]:
-                st.session_state.pop(state_key(name), None)
-
         split_df = df
-        preprocessed_ready = True
-        if split_source == "Import a preprocessed CSV":
-            preprocessed_upload = st.file_uploader(
-                "Upload preprocessed data (CSV)",
-                type=["csv"],
-                key=state_key("preprocessed_upload"),
-                help="The CSV must contain the target and feature columns selected in Step 1.",
-            )
-            if preprocessed_upload is None:
-                preprocessed_ready = False
-                st.info("Upload a preprocessed CSV to continue with the split.")
-            else:
-                try:
-                    split_df = pd.read_csv(preprocessed_upload)
-                    required_columns = setup["features"] + [setup["target"]]
-                    missing_columns = [column for column in required_columns if column not in split_df.columns]
-                    if missing_columns:
-                        preprocessed_ready = False
-                        st.error(
-                            "The preprocessed CSV is missing required columns: "
-                            + ", ".join(map(str, missing_columns))
-                        )
-                    else:
-                        source_id = f"{preprocessed_upload.name}:{preprocessed_upload.size}"
-                        if st.session_state.get(state_key("preprocessed_source_id")) != source_id:
-                            st.session_state[state_key("preprocessed_source_id")] = source_id
-                            for name in ["split", "trained_bundle", "comparison", "cv_results", "tuned_bundle", "prediction"]:
-                                st.session_state.pop(state_key(name), None)
-                        st.success(
-                            f"Preprocessed data loaded: {len(split_df):,} rows and {split_df.shape[1]:,} columns."
-                        )
-                        st.dataframe(split_df.head(10), use_container_width=True)
-                except Exception as exc:
-                    preprocessed_ready = False
-                    st.error(f"Could not read the preprocessed CSV file: {exc}")
-
+        split_source = st.session_state.get(state_key("data_mode_selected"), "Raw data")
+        st.caption(f"Dataset source: **{split_source}**")
         c1, c2 = st.columns(2)
         test_size = c1.slider("Test size (%)", 10, 40, 20, key=state_key("test_size")) / 100
         random_state = c2.number_input("Random state", min_value=0, value=42, step=1, key=state_key("random_state"))
@@ -671,7 +667,6 @@ with tabs[2]:
         if st.button(
             "Split the Dataset",
             type="primary",
-            disabled=not preprocessed_ready,
             key=state_key("split_button"),
         ):
             try:
